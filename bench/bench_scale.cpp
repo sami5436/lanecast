@@ -43,6 +43,7 @@ void register_scale(std::vector<Case>& out) {
   out.push_back(scale_case("area", F::rgba, ScaleFilter::area, 1, 2));
   out.push_back(scale_case("bilinear", F::yuv420p, ScaleFilter::bilinear, 3, 2));
   out.push_back(scale_case("bilinear", F::rgba, ScaleFilter::bilinear, 3, 2));
+  out.push_back(scale_case("bilinear", F::yuv420p, ScaleFilter::bilinear, 2, 3));
 }
 
 }  // namespace lanecast::bench
