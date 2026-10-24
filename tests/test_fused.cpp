@@ -1,11 +1,13 @@
 // fused suite: ScaleConvert equals scale() then convert() bit for bit, for
 // sliced and threaded runs and under every supported ISA tier.
+#include <algorithm>
 #include <cstring>
 #include <memory>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "kernels/scale/kernels.hpp"
 #include "lanecast/pipeline.hpp"
 #include "test_support.hpp"
 
@@ -51,6 +53,51 @@ std::string describe(PixelFormat sf, PixelFormat df, const Size& z) {
   return std::string(pixfmt_name(sf)) + " -> " + std::string(pixfmt_name(df)) + " " +
          std::to_string(z.sw) + "x" + std::to_string(z.sh) + " -> " + std::to_string(z.dw) + "x" +
          std::to_string(z.dh);
+}
+
+// The Q7 vertical kernel against its formula, on every tier. Rows carry the
+// padding that kernels may touch.
+TEST(VerticalQ7KernelMatchesTheFormula) {
+  constexpr std::size_t kPad = 64;
+  test::Rng rng(7);
+  for (const int taps : {1, 2, 3, 4, 5, 8}) {
+    for (const int count : {1, 15, 16, 17, 31, 32, 33, 70, 128}) {
+      const auto n = static_cast<std::size_t>(count);
+      std::vector<std::vector<std::int16_t>> rows(static_cast<std::size_t>(taps),
+                                                  std::vector<std::int16_t>(n + kPad));
+      std::vector<const std::int16_t*> ptrs;
+      for (auto& r : rows) {
+        for (std::size_t i = 0; i < n; ++i) {
+          // Q7 samples, with the extremes 0 and 255 * 128 mixed in.
+          const int pick = rng.range(0, 7);
+          r[i] = static_cast<std::int16_t>(pick == 0   ? 0
+                                           : pick == 1 ? 255 * 128
+                                                       : rng.range(0, 255 * 128));
+        }
+        ptrs.push_back(r.data());
+      }
+      // Non-negative Q14 weights that sum to 16384.
+      std::vector<std::int16_t> w(static_cast<std::size_t>(taps), 0);
+      for (int left = 16384, k = 0; k < taps; ++k) {
+        auto& wk = w[static_cast<std::size_t>(k)];
+        wk = static_cast<std::int16_t>(k + 1 == taps ? left : rng.range(0, left));
+        left -= wk;
+      }
+      std::vector<std::int16_t> want(n);
+      for (std::size_t i = 0; i < n; ++i) {
+        int sum = 0;
+        for (std::size_t k = 0; k < rows.size(); ++k) sum += w[k] * rows[k][i];
+        want[i] = static_cast<std::int16_t>((sum + (1 << 13)) >> 14);
+      }
+      for (const Isa isa : supported_isas()) {
+        std::vector<std::int16_t> got(n + kPad, -1);
+        kernels::scale::table(isa).vscale_q7(ptrs.data(), w.data(), taps, got.data(), count);
+        CHECK_MSG(std::equal(want.begin(), want.end(), got.begin()),
+                  test::show(isa) + " taps " + std::to_string(taps) + " count " +
+                      std::to_string(count));
+      }
+    }
+  }
 }
 
 TEST(ScaleConvertEqualsScaleThenConvertOnEveryIsa) {
