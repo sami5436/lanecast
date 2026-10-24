@@ -41,8 +41,30 @@ std::uint64_t sse_row(const std::uint8_t* a, const std::uint8_t* b, int count) {
   return total;
 }
 
+std::uint64_t sad_row(const std::uint8_t* a, const std::uint8_t* b, int count) {
+  std::uint64_t total = 0;
+  while (count >= 16) {
+    // A u16 lane gains at most 510 per block, so 128 blocks cannot wrap.
+    const int n = count / 16 < 128 ? count / 16 : 128;
+    uint16x8_t acc = vdupq_n_u16(0);
+    for (int i = 0; i < n; ++i, a += 16, b += 16) {
+      acc = vpadalq_u8(acc, vabdq_u8(vld1q_u8(a), vld1q_u8(b)));
+    }
+    total += vaddlvq_u16(acc);
+    count -= n * 16;
+  }
+  if (count > 0) {
+    const uint8x16_t d = vandq_u8(vabdq_u8(vld1q_u8(a), vld1q_u8(b)), tail_mask(count));
+    total += vaddlvq_u8(d);
+  }
+  return total;
+}
+
 }  // namespace
 
-void fill_neon(Table& t) { t.sse = &sse_row; }
+void fill_neon(Table& t) {
+  t.sse = &sse_row;
+  t.sad = &sad_row;
+}
 
 }  // namespace lanecast::kernels::metrics
