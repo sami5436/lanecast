@@ -86,6 +86,7 @@ void fill_neon(Table& t);
 // Called by fill_neon; split into their own TUs to keep files small.
 void fill_neon_yuv2rgb(Table& t);
 void fill_neon_rgb2yuv(Table& t);
+void fill_neon_fast(Table& t);
 void fill_sse41(Table& t);
 void fill_avx2(Table& t);
 // Called by fill_sse41 / fill_avx2, likewise split by direction.

@@ -61,6 +61,7 @@ void fill_neon(Table& t) {
   t.gray_to_packed[kBgra] = &gray_to_packed_row<kBgra>;
   fill_neon_yuv2rgb(t);
   fill_neon_rgb2yuv(t);
+  fill_neon_fast(t);
 }
 
 }  // namespace lanecast::kernels::convert
