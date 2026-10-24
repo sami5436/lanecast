@@ -54,13 +54,21 @@ std::uint64_t sse_row(const std::uint8_t* a, const std::uint8_t* b, int count) {
 std::uint64_t sad_row(const std::uint8_t* a, const std::uint8_t* b, int count) {
   std::uint64_t total = 0;
   while (count >= 16) {
-    // A u16 lane gains at most 510 per block, so 128 blocks cannot wrap.
+    // A u16 lane gains at most 510 per block; with two accumulators 128 blocks
+    // cannot wrap either.
     const int n = count / 16 < 128 ? count / 16 : 128;
-    uint16x8_t acc = vdupq_n_u16(0);
-    for (int i = 0; i < n; ++i, a += 16, b += 16) {
-      acc = vpadalq_u8(acc, vabdq_u8(vld1q_u8(a), vld1q_u8(b)));
+    uint16x8_t acc0 = vdupq_n_u16(0), acc1 = acc0;
+    int i = 0;
+    for (; i + 2 <= n; i += 2, a += 32, b += 32) {
+      acc0 = vpadalq_u8(acc0, vabdq_u8(vld1q_u8(a), vld1q_u8(b)));
+      acc1 = vpadalq_u8(acc1, vabdq_u8(vld1q_u8(a + 16), vld1q_u8(b + 16)));
     }
-    total += vaddlvq_u16(acc);
+    if (i < n) {
+      acc0 = vpadalq_u8(acc0, vabdq_u8(vld1q_u8(a), vld1q_u8(b)));
+      a += 16;
+      b += 16;
+    }
+    total += vaddlvq_u16(vaddq_u16(acc0, acc1));
     count -= n * 16;
   }
   if (count > 0) {
