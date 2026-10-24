@@ -30,9 +30,18 @@ enum Packed : int { kRgb24 = 0, kRgba = 1, kBgra = 2, kPackedCount = 3 };
 using Yuv420ToPackedRowFn = void (*)(const std::uint8_t* y, const std::uint8_t* u,
                                      const std::uint8_t* v, std::uint8_t* dst, int width,
                                      const YuvToRgbCoeffs& c);
+// Bilinear variant (formula in convert.hpp). u0, v0 are the chroma row of the
+// luma row (cy = y >> 1), u1, v1 the vertical neighbor row cyn (weight 1).
+using Yuv420BilinearToPackedRowFn = void (*)(const std::uint8_t* y, const std::uint8_t* u0,
+                                             const std::uint8_t* u1, const std::uint8_t* v0,
+                                             const std::uint8_t* v1, std::uint8_t* dst,
+                                             int width, const YuvToRgbCoeffs& c);
 // One output row of nv12 -> packed. uv is the interleaved chroma row.
 using Nv12ToPackedRowFn = void (*)(const std::uint8_t* y, const std::uint8_t* uv,
                                    std::uint8_t* dst, int width, const YuvToRgbCoeffs& c);
+using Nv12BilinearToPackedRowFn = void (*)(const std::uint8_t* y, const std::uint8_t* uv0,
+                                           const std::uint8_t* uv1, std::uint8_t* dst, int width,
+                                           const YuvToRgbCoeffs& c);
 // Two source rows -> two luma rows and one chroma row. For the last row of
 // an odd height, src1 == src0 and y1 == y0.
 using PackedToYuv420RowFn = void (*)(const std::uint8_t* src0, const std::uint8_t* src1,
@@ -55,6 +64,8 @@ using GrayToPackedRowFn = void (*)(const std::uint8_t* gray, std::uint8_t* dst, 
 struct Table {
   Yuv420ToPackedRowFn yuv420_to_packed[kPackedCount] = {};
   Nv12ToPackedRowFn nv12_to_packed[kPackedCount] = {};
+  Yuv420BilinearToPackedRowFn yuv420_bilinear_to_packed[kPackedCount] = {};
+  Nv12BilinearToPackedRowFn nv12_bilinear_to_packed[kPackedCount] = {};
   PackedToYuv420RowFn packed_to_yuv420[kPackedCount] = {};
   PackedToNv12RowFn packed_to_nv12[kPackedCount] = {};
   SwizzleRowFn swizzle[kPackedCount][kPackedCount] = {};  // [src][dst], src != dst
