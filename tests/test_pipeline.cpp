@@ -329,6 +329,47 @@ TEST(PipelineScaleThenFormatMatchesDirectOps) {
   }
 }
 
+TEST(PipelineHonorsInputChromaSiting) {
+  // Center-sited input must reach both the scaler and the converter; with the
+  // left default anywhere in the chain the bytes differ.
+  Frame in = test::random_frame(PixelFormat::yuv420p, 67, 45, 12);
+  VideoInfo info = info_of(PixelFormat::yuv420p, 67, 45);
+  info.chroma_loc = ChromaLocation::center;
+
+  const auto direct = [&](ChromaLocation loc) {
+    Frame scaled;
+    Frame rgb;
+    REQUIRE_OK(Frame::allocate(PixelFormat::yuv420p, 34, 20, scaled));
+    REQUIRE_OK(scale(in, scaled, ScaleFilter::bilinear, {}, loc));
+    REQUIRE_OK(Frame::allocate(PixelFormat::rgb24, 34, 20, rgb));
+    ConvertOptions co;
+    co.chroma_loc = loc;
+    REQUIRE_OK(convert(scaled, rgb, co));
+    return rgb;
+  };
+  const Frame expected = direct(ChromaLocation::center);
+  CHECK(!test::first_difference(expected, direct(ChromaLocation::left)).empty());
+
+  for (const int threads : {1, 4}) {
+    auto p = make_pipeline("scale=34:20,format=rgb24", info, threads, 2);
+    REQUIRE(p != nullptr);
+    Frame out;
+    REQUIRE_OK(p->process(in, out));
+    CHECK_MSG(test::first_difference(expected, out).empty(), test::first_difference(expected, out));
+  }
+}
+
+TEST(PipelineFormatChromaLocOption) {
+  auto p = make_pipeline("format=yuv420p:chroma_loc=center", info_of(PixelFormat::rgb24, 8, 8), 1);
+  REQUIRE(p != nullptr);
+  CHECK(p->output_info().chroma_loc == ChromaLocation::center);
+  p = make_pipeline("format=yuv420p", info_of(PixelFormat::rgb24, 8, 8), 1);
+  REQUIRE(p != nullptr);
+  CHECK(p->output_info().chroma_loc == ChromaLocation::left);
+  make_pipeline("format=rgb24:chroma_loc=top", info_of(PixelFormat::yuv420p, 8, 8), 1,
+                32, Status::invalid_argument);
+}
+
 TEST(PipelineThreadedEqualsSingleThread) {
   struct Case {
     PixelFormat fmt;
