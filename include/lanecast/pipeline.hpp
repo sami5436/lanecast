@@ -76,7 +76,8 @@ Status run_sliced(ThreadPool* pool, int height, int alignment,
 // row strip: each strip scales the Y and chroma rows it needs into
 // thread-local strip buffers and converts them straight into dst.
 // Bit-exact contract: the output equals
-//   scale(src, tmp_yuv at dst size, filter) followed by convert(tmp_yuv, dst, opts)
+//   scale(src, tmp_yuv at dst size, filter, {}, opts.chroma_loc)
+//   followed by convert(tmp_yuv, dst, opts)
 // so it can be tested against the unfused ops.
 class ScaleConvert {
  public:

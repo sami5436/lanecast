@@ -85,8 +85,10 @@ metrics: compute_psnr / compute_ssim(a, b) -> integer sums per row -> double mat
 - A kernel may read and write up to 64 bytes past the last visible byte of
   any row it owns. Finish tails with one full vector, not a scalar loop.
 - Padding is unspecified; results must not depend on it. Tests poison it.
-- No vertical overread: kernels touch only the rows they are given, so
-  slices on different threads never share bytes.
+- Kernels never write outside the rows they are given, so slices on
+  different threads never write the same bytes. They may read neighbor
+  source rows (scale filter taps, bilinear chroma), which is safe because
+  sources are read-only during a call.
 
 ### ISA tiers and dispatch (include/lanecast/cpu.hpp, src/core/dispatch.hpp)
 - Chains: AArch64 `scalar < neon < neon_dotprod < neon_i8mm`; x86-64
@@ -113,8 +115,10 @@ metrics: compute_psnr / compute_ssim(a, b) -> integer sums per row -> double mat
    also adds its fill to that directory's `dispatch.cpp`.
 
 ### SIMD translation unit rules
-- Include only `<cstddef>`, `<cstdint>`, intrinsic headers and the
-  directory's `kernels.hpp`. Kernel signatures take raw pointers and PODs.
+- Include only standard headers, intrinsic headers, the directory's
+  `kernels.hpp` and that directory's shared ISA helpers (`*_common.hpp`,
+  `*_x86.hpp`), which keep everything in an anonymous namespace. Kernel
+  signatures take raw pointers and PODs.
 - Do not call inline functions or templates from other headers inside ISA
   files: COMDAT folding can make every caller use the copy compiled with
   `-mavx2` (or `+dotprod`) and crash older CPUs. Helpers go in an anonymous
@@ -124,14 +128,18 @@ metrics: compute_psnr / compute_ssim(a, b) -> integer sums per row -> double mat
 
 ### Bit-exact contracts (full text in the public headers)
 - **YUV to RGB** (convert.hpp): Q13 coefficients, int32,
-  `R = clamp8((cy*(Y-yoff) + crv*(V-128) + 4096) >> 13)`, G and B alike,
-  nearest chroma. Coefficient tables for BT.601/BT.709 x limited/full are
+  `R = clamp8((cy*(Y-yoff) + crv*(V-128) + 4096) >> 13)`, G and B alike.
+  Chroma is bilinear by default (nearest optional), sited left or center
+  per `ChromaLocation`. Coefficient tables for BT.601/BT.709 x limited/full are
   constexpr in the header and fit int16.
 - **RGB to YUV** (convert.hpp): Q15, `Y = clamp8((yr*R + yg*G + yb*B +
-  (yoff << 15) + 16384) >> 15)`; chroma from 2x2 sums with edge replication,
-  `>> 17` with `(128 << 17) + 65536`. Sums adjusted so gray maps to 128 exactly.
-- **Scale** (scale.hpp): integer-built filter tables (bilinear center
-  aligned, area box coverage), Q14 weights summing to 16384; horizontal
+  (yoff << 15) + 16384) >> 15)`; chroma for left siting from horizontal
+  [1 2 1] taps times a 2-row sum, `>> 18` with `(128 << 18) + (1 << 17)`;
+  for center siting from 2x2 sums, `>> 17`. Edge replication; gray maps to
+  128 exactly.
+- **Scale** (scale.hpp): integer-built filter tables equivalent to
+  swscale's (bilinear widens its triangle on downscale, area box coverage,
+  chroma planes honor `ChromaLocation`), Q14 weights summing to 16384; horizontal
   first: `mid = (sum + 64) >> 7` into int16, then vertical
   `clamp8((sum + (1 << 20)) >> 21)`.
 - **Filter** (filter.hpp): `div255` blend, binomial blur with exact integer
