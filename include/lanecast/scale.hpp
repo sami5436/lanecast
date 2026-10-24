@@ -42,7 +42,9 @@
 // src_pos and dst_pos place the sample inside its pixel, in 1/256 pixel:
 // 128 is the pixel center (luma, and chroma sited at the center), 64 is a
 // half-subsampled chroma plane whose samples sit on the left luma column
-// (swscale's src_h_chr_pos / dst_h_chr_pos after get_local_pos).
+// (swscale's src_h_chr_pos / dst_h_chr_pos after get_local_pos). Scaler uses
+// 128 for luma and vertical axes and, for horizontally halved planes, 64
+// (ChromaLocation::left) or 128 (center), the same for source and target.
 //
 // Pass math (int32):
 //   mid[x] = (sum_k wx[x][k] * src[start_x[x] + k] + 64) >> 7   // 0..32640, int16
@@ -75,8 +77,11 @@ Status build_scale_filter(ScaleFilter filter, int src_size, int dst_size, ScaleF
 // heap allocation after the first call on each thread (thread-local scratch).
 class Scaler {
  public:
+  // chroma_loc sites the horizontally subsampled planes (4:2:0 chroma, nv12 UV)
+  // of both source and target; vertical siting is always centered.
   static Status create(PixelFormat format, int src_width, int src_height, int dst_width,
-                       int dst_height, ScaleFilter filter, std::unique_ptr<Scaler>& out);
+                       int dst_height, ScaleFilter filter, std::unique_ptr<Scaler>& out,
+                       ChromaLocation chroma_loc = ChromaLocation::center);
   ~Scaler();
   Scaler(const Scaler&) = delete;
   Scaler& operator=(const Scaler&) = delete;
@@ -95,6 +100,6 @@ class Scaler {
 // Convenience: builds a Scaler and runs it. src and dst share a format;
 // dst must be allocated at the target size.
 Status scale(const Frame& src, Frame& dst, ScaleFilter filter = ScaleFilter::bilinear,
-             RowRange rows = {});
+             RowRange rows = {}, ChromaLocation chroma_loc = ChromaLocation::center);
 
 }  // namespace lanecast

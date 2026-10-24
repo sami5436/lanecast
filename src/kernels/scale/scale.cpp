@@ -15,6 +15,7 @@ namespace lanecast {
 namespace {
 
 constexpr std::int64_t kOne = 1 << 14;
+constexpr int kCenterPos = 128;  // sample centered in its pixel, see scale.hpp
 constexpr int kWeightPad = 16;  // zero weights after the last row, see FilterView
 
 std::size_t align64(std::size_t n) { return (n + 63) & ~static_cast<std::size_t>(63); }
@@ -185,7 +186,8 @@ Status build_scale_filter(ScaleFilter filter, int src_size, int dst_size, ScaleF
 }
 
 Status Scaler::create(PixelFormat format, int src_width, int src_height, int dst_width,
-                      int dst_height, ScaleFilter filter, std::unique_ptr<Scaler>& out) {
+                      int dst_height, ScaleFilter filter, std::unique_ptr<Scaler>& out,
+                      ChromaLocation chroma_loc) {
   if (static_cast<int>(format) >= kPixelFormatCount) return Status::unsupported_format;
   for (const int d : {src_width, src_height, dst_width, dst_height}) {
     if (d < 1 || d > kMaxDimension) return Status::invalid_argument;
@@ -203,7 +205,14 @@ Status Scaler::create(PixelFormat format, int src_width, int src_height, int dst
     j.channels = pixfmt_info(format).bytes_per_pixel[pi];
     j.dst_w = plane_width(format, p, dst_width);
     j.shift_y = pixfmt_info(format).shift_y[pi];
-    if (Status s = build_scale_filter(filter, plane_width(format, p, src_width), j.dst_w, j.hx);
+    // Horizontally subsampled planes are chroma: left siting puts the sample
+    // on the first luma column of its pair.
+    const int shift_x = pixfmt_info(format).shift_x[pi];
+    const int pos_x =
+        shift_x == 0 ? kCenterPos
+                     : ((chroma_loc == ChromaLocation::left ? 0 : kCenterPos) + 128) >> shift_x;
+    if (Status s = build_scale_filter(filter, plane_width(format, p, src_width), j.dst_w, j.hx,
+                                      pos_x, pos_x);
         s != Status::ok) {
       return s;
     }
@@ -280,10 +289,11 @@ Status Scaler::run(const Frame& src, Frame& dst, RowRange rows) const {
   return Status::ok;
 }
 
-Status scale(const Frame& src, Frame& dst, ScaleFilter filter, RowRange rows) {
+Status scale(const Frame& src, Frame& dst, ScaleFilter filter, RowRange rows,
+             ChromaLocation chroma_loc) {
   std::unique_ptr<Scaler> scaler;
   if (Status s = Scaler::create(src.format(), src.width(), src.height(), dst.width(),
-                                dst.height(), filter, scaler);
+                                dst.height(), filter, scaler, chroma_loc);
       s != Status::ok) {
     return s;
   }

@@ -339,6 +339,27 @@ TEST(downscale_averages_stripes) {
   }
 }
 
+TEST(chroma_siting_moves_only_subsampled_planes) {
+  for (const PixelFormat fmt : {PixelFormat::yuv420p, PixelFormat::nv12, PixelFormat::rgb24}) {
+    const Frame src = test::random_frame(fmt, 64, 32, 5);
+    Frame left = make_frame(fmt, 40, 20);
+    Frame center = make_frame(fmt, 40, 20);
+    REQUIRE_OK(scale(src, left, ScaleFilter::bilinear, {}, ChromaLocation::left));
+    REQUIRE_OK(scale(src, center, ScaleFilter::bilinear, {}, ChromaLocation::center));
+    for (int p = 0; p < left.plane_count(); ++p) {
+      const Plane a = left.plane(p);
+      const Plane b = center.plane(p);
+      bool same = true;
+      for (int y = 0; y < a.height; ++y) {
+        same = same && std::memcmp(a.row(y), b.row(y), static_cast<std::size_t>(a.width) *
+                                                           static_cast<std::size_t>(a.bytes_per_pixel)) == 0;
+      }
+      CHECK_MSG(same == (p == 0 || fmt == PixelFormat::rgb24),
+                std::string(pixfmt_name(fmt)) + " plane " + std::to_string(p));
+    }
+  }
+}
+
 TEST(all_isas_match) {
   for (const PixelFormat fmt : kFormats) {
     for (const ScaleFilter f : kFilters) {
@@ -347,8 +368,10 @@ TEST(all_isas_match) {
         const std::pair<int, int> targets[] = {
             {w, h}, {w * 3 / 2 + 1, h / 2 + 1}, {w / 2 + 1, h * 2}, {1, 1}, {w / 3 + 1, h + 3}};
         for (const auto& [dw, dh] : targets) {
-          CHECK_ALL_ISAS_MATCH([&] { return make_frame(fmt, dw, dh); },
-                               [&](Frame& out) { return scale(src, out, f); });
+          for (const ChromaLocation loc : {ChromaLocation::center, ChromaLocation::left}) {
+            CHECK_ALL_ISAS_MATCH([&] { return make_frame(fmt, dw, dh); },
+                                 [&](Frame& out) { return scale(src, out, f, {}, loc); });
+          }
         }
       }
     }
