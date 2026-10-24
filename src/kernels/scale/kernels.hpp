@@ -17,11 +17,22 @@ namespace lanecast::kernels::scale {
 // is taps when taps <= 2, else taps rounded up to a multiple of 4. Padding
 // weights are zero and 16 more zeros follow the last row, so a kernel may
 // load whole vectors from any row.
+//
+// Optional block tables for 1 channel rows with 2..6 taps (tbl_blocks == 0
+// when absent): the first tbl_blocks groups of 8 outputs have all their
+// source bytes inside the 32 bytes at src + start[8 * b], which lets a kernel
+// replace gathers with table lookups. Per block, tbl holds ceil(taps / 2)
+// vectors of 16 byte indices (bytes 0..7: tap 2m of outputs 0..7, bytes 8..15:
+// tap 2m + 1; odd tap counts leave the last half zero), and wt holds taps
+// vectors of 8 weights (tap-major, outputs in lanes).
 struct FilterView {
   int taps;
   int stride;
   const std::int32_t* start;    // dst_size entries
   const std::int16_t* weights;  // Q14
+  int tbl_blocks = 0;
+  const std::uint8_t* tbl = nullptr;
+  const std::int16_t* wt = nullptr;
 };
 
 // Horizontal pass of one row with C interleaved channels (C = table index):

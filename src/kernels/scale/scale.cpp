@@ -28,9 +28,44 @@ struct PlaneJob {
   int shift_y = 0;
   ScaleFilterTable hx, hy;
   std::vector<std::int16_t> hx_weights;
+  std::vector<std::uint8_t> hx_tbl;
+  std::vector<std::int16_t> hx_wt;
   kernels::scale::FilterView hview{};
   std::size_t mid_stride = 0;  // int16 elements per intermediate row, incl. slack
 };
+
+// Block tables for the table-lookup horizontal kernels, see FilterView. Keeps
+// the leading run of full 8 output blocks that fit in a 32 byte window.
+void build_block_tables(PlaneJob& j, int src_size) {
+  const int taps = j.hx.taps;
+  if (j.channels != 1 || taps < 2 || taps > 6) return;
+  const auto& start = j.hx.start;
+  int blocks = 0;
+  for (; (blocks + 1) * 8 <= j.dst_w; ++blocks) {
+    const int base = start[static_cast<std::size_t>(blocks) * 8];
+    const int last = start[static_cast<std::size_t>(blocks) * 8 + 7];
+    if (base + 32 > src_size || last + taps - base > 32) break;
+  }
+  if (blocks == 0) return;
+  const int pairs = (taps + 1) / 2;
+  j.hx_tbl.assign(static_cast<std::size_t>(blocks) * pairs * 16, 0);
+  j.hx_wt.assign(static_cast<std::size_t>(blocks) * taps * 8, 0);
+  for (int b = 0; b < blocks; ++b) {
+    const int base = start[static_cast<std::size_t>(b) * 8];
+    for (int lane = 0; lane < 8; ++lane) {
+      const auto x = static_cast<std::size_t>(b * 8 + lane);
+      for (int k = 0; k < taps; ++k) {
+        j.hx_tbl[(static_cast<std::size_t>(b) * pairs + k / 2) * 16 + (k & 1) * 8 + lane] =
+            static_cast<std::uint8_t>(start[x] + k - base);
+        j.hx_wt[(static_cast<std::size_t>(b) * taps + k) * 8 + lane] =
+            j.hx.weights[x * taps + k];
+      }
+    }
+  }
+  j.hview.tbl_blocks = blocks;
+  j.hview.tbl = j.hx_tbl.data();
+  j.hview.wt = j.hx_wt.data();
+}
 
 }  // namespace
 
@@ -231,6 +266,7 @@ Status Scaler::create(PixelFormat format, int src_width, int src_height, int dst
                   j.hx_weights.data() + static_cast<std::size_t>(x) * stride);
     }
     j.hview = {taps, stride, j.hx.start.data(), j.hx_weights.data()};
+    build_block_tables(j, plane_width(format, p, src_width));
     j.mid_stride = align64(static_cast<std::size_t>(j.dst_w) * j.channels * 2 + 64) / 2;
   }
   out.reset(new Scaler(std::move(impl)));
