@@ -377,3 +377,17 @@ TEST(all_isas_match) {
     }
   }
 }
+
+// Downscale ratios and widths that exercise the 1 channel table-lookup
+// horizontal kernels (full 8 output blocks plus a ragged tail).
+TEST(all_isas_match_table_lookup_ratios) {
+  for (const ScaleFilter f : kFilters) {
+    for (const auto& [sw, dw] :
+         {std::pair{203, 135}, {300, 100}, {301, 101}, {640, 213}, {257, 128}}) {
+      const Frame src =
+          test::random_frame(PixelFormat::yuv420p, sw, 12, 5 + static_cast<std::uint64_t>(sw));
+      CHECK_ALL_ISAS_MATCH([&] { return make_frame(PixelFormat::yuv420p, dw, 8); },
+                           [&](Frame& out) { return scale(src, out, f); });
+    }
+  }
+}
