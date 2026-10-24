@@ -88,6 +88,114 @@ void nv12_bilinear_row(const std::uint8_t* y, const std::uint8_t* uv0, const std
   }
 }
 
+template <int P>
+inline int luma(const std::uint8_t* p, const RgbToYuvCoeffs& k) {
+  using L = Layout<P>;
+  return clamp8((k.yr * p[L::r] + k.yg * p[L::g] + k.yb * p[L::b] + (k.y_offset << 15) + 16384) >>
+                15);
+}
+
+// Chroma sample cx from the 2x2 sums (convert.hpp); the right column is
+// clamped for odd widths. s0, s1 are the two source rows, either may repeat.
+template <int P>
+inline void chroma_at(const std::uint8_t* s0, const std::uint8_t* s1, int cx, int width,
+                      const RgbToYuvCoeffs& k, int& u, int& v) {
+  using L = Layout<P>;
+  const int x0 = cx * 2, x1 = std::min(x0 + 1, width - 1);
+  const std::uint8_t* const q[4] = {s0 + x0 * L::bpp, s0 + x1 * L::bpp, s1 + x0 * L::bpp,
+                                    s1 + x1 * L::bpp};
+  int sr = 0, sg = 0, sb = 0;
+  for (const std::uint8_t* p : q) {
+    sr += p[L::r];
+    sg += p[L::g];
+    sb += p[L::b];
+  }
+  u = clamp8((k.ur * sr + k.ug * sg + k.ub * sb + (128 << 17) + 65536) >> 17);
+  v = clamp8((k.vr * sr + k.vg * sg + k.vb * sb + (128 << 17) + 65536) >> 17);
+}
+
+template <int P>
+void luma_rows(const std::uint8_t* s0, const std::uint8_t* s1, std::uint8_t* y0, std::uint8_t* y1,
+               int width, const RgbToYuvCoeffs& k) {
+  for (int x = 0; x < width; ++x) {
+    y0[x] = static_cast<std::uint8_t>(luma<P>(s0 + x * Layout<P>::bpp, k));
+    y1[x] = static_cast<std::uint8_t>(luma<P>(s1 + x * Layout<P>::bpp, k));
+  }
+}
+
+template <int P>
+void packed_to_yuv420_row(const std::uint8_t* s0, const std::uint8_t* s1, std::uint8_t* y0,
+                          std::uint8_t* y1, std::uint8_t* u, std::uint8_t* v, int width,
+                          const RgbToYuvCoeffs& k) {
+  luma_rows<P>(s0, s1, y0, y1, width, k);
+  for (int cx = 0; cx < (width + 1) / 2; ++cx) {
+    int cu, cv;
+    chroma_at<P>(s0, s1, cx, width, k, cu, cv);
+    u[cx] = static_cast<std::uint8_t>(cu);
+    v[cx] = static_cast<std::uint8_t>(cv);
+  }
+}
+
+template <int P>
+void packed_to_nv12_row(const std::uint8_t* s0, const std::uint8_t* s1, std::uint8_t* y0,
+                        std::uint8_t* y1, std::uint8_t* uv, int width, const RgbToYuvCoeffs& k) {
+  luma_rows<P>(s0, s1, y0, y1, width, k);
+  for (int cx = 0; cx < (width + 1) / 2; ++cx) {
+    int cu, cv;
+    chroma_at<P>(s0, s1, cx, width, k, cu, cv);
+    uv[cx * 2] = static_cast<std::uint8_t>(cu);
+    uv[cx * 2 + 1] = static_cast<std::uint8_t>(cv);
+  }
+}
+
+// Packed to packed: reorder channels, alpha = 255 when added, dropped when not.
+template <int S, int D>
+void swizzle_row(const std::uint8_t* src, std::uint8_t* dst, int width) {
+  using LS = Layout<S>;
+  using LD = Layout<D>;
+  for (int x = 0; x < width; ++x) {
+    const std::uint8_t* s = src + x * LS::bpp;
+    std::uint8_t* d = dst + x * LD::bpp;
+    const std::uint8_t r = s[LS::r], g = s[LS::g], b = s[LS::b];
+    d[LD::r] = r;
+    d[LD::g] = g;
+    d[LD::b] = b;
+    if constexpr (LD::a >= 0) d[LD::a] = LS::a >= 0 ? s[LS::a] : 255;
+  }
+}
+
+void interleave_uv_row(const std::uint8_t* u, const std::uint8_t* v, std::uint8_t* uv, int cw) {
+  for (int i = 0; i < cw; ++i) {
+    uv[2 * i] = u[i];
+    uv[2 * i + 1] = v[i];
+  }
+}
+
+void deinterleave_uv_row(const std::uint8_t* uv, std::uint8_t* u, std::uint8_t* v, int cw) {
+  for (int i = 0; i < cw; ++i) {
+    u[i] = uv[2 * i];
+    v[i] = uv[2 * i + 1];
+  }
+}
+
+template <int P>
+void packed_to_gray_row(const std::uint8_t* src, std::uint8_t* gray, int width,
+                        const RgbToYuvCoeffs& k) {
+  for (int x = 0; x < width; ++x) {
+    gray[x] = static_cast<std::uint8_t>(luma<P>(src + x * Layout<P>::bpp, k));
+  }
+}
+
+template <int P>
+void gray_to_packed_row(const std::uint8_t* gray, std::uint8_t* dst, int width) {
+  using L = Layout<P>;
+  for (int x = 0; x < width; ++x) {
+    std::uint8_t* d = dst + x * L::bpp;
+    d[L::r] = d[L::g] = d[L::b] = gray[x];
+    if constexpr (L::a >= 0) d[L::a] = 255;
+  }
+}
+
 }  // namespace
 
 void fill_scalar(Table& t) {
@@ -103,6 +211,30 @@ void fill_scalar(Table& t) {
   t.nv12_bilinear_to_packed[kRgb24] = &nv12_bilinear_row<kRgb24>;
   t.nv12_bilinear_to_packed[kRgba] = &nv12_bilinear_row<kRgba>;
   t.nv12_bilinear_to_packed[kBgra] = &nv12_bilinear_row<kBgra>;
+
+  t.packed_to_yuv420[kRgb24] = &packed_to_yuv420_row<kRgb24>;
+  t.packed_to_yuv420[kRgba] = &packed_to_yuv420_row<kRgba>;
+  t.packed_to_yuv420[kBgra] = &packed_to_yuv420_row<kBgra>;
+  t.packed_to_nv12[kRgb24] = &packed_to_nv12_row<kRgb24>;
+  t.packed_to_nv12[kRgba] = &packed_to_nv12_row<kRgba>;
+  t.packed_to_nv12[kBgra] = &packed_to_nv12_row<kBgra>;
+
+  t.swizzle[kRgb24][kRgba] = &swizzle_row<kRgb24, kRgba>;
+  t.swizzle[kRgb24][kBgra] = &swizzle_row<kRgb24, kBgra>;
+  t.swizzle[kRgba][kRgb24] = &swizzle_row<kRgba, kRgb24>;
+  t.swizzle[kRgba][kBgra] = &swizzle_row<kRgba, kBgra>;
+  t.swizzle[kBgra][kRgb24] = &swizzle_row<kBgra, kRgb24>;
+  t.swizzle[kBgra][kRgba] = &swizzle_row<kBgra, kRgba>;
+
+  t.interleave_uv = &interleave_uv_row;
+  t.deinterleave_uv = &deinterleave_uv_row;
+
+  t.packed_to_gray[kRgb24] = &packed_to_gray_row<kRgb24>;
+  t.packed_to_gray[kRgba] = &packed_to_gray_row<kRgba>;
+  t.packed_to_gray[kBgra] = &packed_to_gray_row<kBgra>;
+  t.gray_to_packed[kRgb24] = &gray_to_packed_row<kRgb24>;
+  t.gray_to_packed[kRgba] = &gray_to_packed_row<kRgba>;
+  t.gray_to_packed[kBgra] = &gray_to_packed_row<kBgra>;
 }
 
 }  // namespace lanecast::kernels::convert
