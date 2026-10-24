@@ -214,28 +214,18 @@ int cmd_convert(Options& o) {
     return fail("cannot write output '" + o.output + "': " + std::string(status_name(s)));
   }
 
-  Frame in;
-  Frame out;
-  long long count = 0;
-  double process_seconds = 0;
+  StreamOptions so;
+  so.max_frames = o.frames;
   const auto start = std::chrono::steady_clock::now();
-  while (o.frames < 0 || count < o.frames) {
-    Status s = reader->read(in);
-    if (s == Status::end_of_stream) break;
-    if (s != Status::ok) {
-      return fail("reading frame " + std::to_string(count) + ": " + std::string(status_name(s)));
-    }
-    const auto t0 = std::chrono::steady_clock::now();
-    s = pipeline->process(in, out);
-    process_seconds += seconds_since(t0);
-    if (s != Status::ok) {
-      return fail("processing frame " + std::to_string(count) + ": " + std::string(status_name(s)));
-    }
-    if (s = writer->write(out); s != Status::ok) {
-      return fail("writing frame " + std::to_string(count) + ": " + std::string(status_name(s)));
-    }
-    ++count;
+  const StreamResult run = run_stream(*reader, *pipeline, *writer, so);
+  if (run.status != Status::ok) {
+    const char* what = run.stage == StreamResult::Stage::read      ? "reading"
+                       : run.stage == StreamResult::Stage::process ? "processing"
+                                                                   : "writing";
+    return fail(std::string(what) + " frame " + std::to_string(run.failed_frame) + ": " +
+                std::string(status_name(run.status)));
   }
+  const long long count = run.frames;
   if (const Status s = writer->finish(); s != Status::ok) {
     return fail("finishing output: " + std::string(status_name(s)));
   }
@@ -243,6 +233,7 @@ int cmd_convert(Options& o) {
 
   if (o.benchmark) {
     const double total = seconds_since(start);
+    const double process_seconds = run.process_seconds;
     const auto n = static_cast<double>(count);
     std::fprintf(stderr, "frames: %lld\n", count);
     std::fprintf(stderr, "total:   %8.2f fps  %8.3f ms/frame  (read, process, write)\n", n / total,
