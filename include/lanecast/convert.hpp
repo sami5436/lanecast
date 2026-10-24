@@ -82,17 +82,11 @@ namespace lanecast {
 // Chroma upsampling used for yuv420p / nv12 -> rgb (formulas above).
 enum class ChromaMode : std::uint8_t { nearest, bilinear };
 
-// Horizontal siting of 4:2:0 chroma, used by bilinear upsampling and by the
-// rgb to yuv downsample. left is the MPEG-2 / H.264 default (chroma co-sited
-// with the even luma column); center is MPEG-1 / JPEG (chroma centered
-// between two luma columns). Vertical siting is always centered.
-enum class ChromaLocation : std::uint8_t { left, center };
-
 struct ConvertOptions {
   ColorMatrix matrix = ColorMatrix::bt601;
   ColorRange range = ColorRange::limited;  // range of the YUV side
   ChromaMode chroma = ChromaMode::bilinear;
-  ChromaLocation chroma_loc = ChromaLocation::left;
+  ChromaLocation chroma_loc = ChromaLocation::left;  // bilinear upsample and rgb to yuv downsample
 };
 
 struct YuvToRgbCoeffs {
