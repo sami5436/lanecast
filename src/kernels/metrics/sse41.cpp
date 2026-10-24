@@ -78,11 +78,62 @@ std::uint64_t sad_row(const std::uint8_t* a, const std::uint8_t* b, int count) {
          static_cast<std::uint64_t>(_mm_extract_epi64(acc, 1));
 }
 
+// Sums for 4 adjacent 4x4 blocks (16 columns). out[k] receives block k as
+// {sum a, sum b, sum a^2 + b^2, sum a*b}.
+inline void ssim_group(const std::uint8_t* a, std::ptrdiff_t a_stride, const std::uint8_t* b,
+                       std::ptrdiff_t b_stride, __m128i out[4]) {
+  const __m128i zero = _mm_setzero_si128();
+  const __m128i ones8 = _mm_set1_epi8(1);
+  const __m128i ones16 = _mm_set1_epi16(1);
+  __m128i s1 = zero, s2 = zero, ss_lo = zero, ss_hi = zero, ab_lo = zero, ab_hi = zero;
+  for (int y = 0; y < 4; ++y, a += a_stride, b += b_stride) {
+    const __m128i va = load(a);
+    const __m128i vb = load(b);
+    s1 = _mm_add_epi16(s1, _mm_maddubs_epi16(va, ones8));
+    s2 = _mm_add_epi16(s2, _mm_maddubs_epi16(vb, ones8));
+    const __m128i al = _mm_unpacklo_epi8(va, zero), ah = _mm_unpackhi_epi8(va, zero);
+    const __m128i bl = _mm_unpacklo_epi8(vb, zero), bh = _mm_unpackhi_epi8(vb, zero);
+    ss_lo = _mm_add_epi32(ss_lo, _mm_add_epi32(_mm_madd_epi16(al, al), _mm_madd_epi16(bl, bl)));
+    ss_hi = _mm_add_epi32(ss_hi, _mm_add_epi32(_mm_madd_epi16(ah, ah), _mm_madd_epi16(bh, bh)));
+    ab_lo = _mm_add_epi32(ab_lo, _mm_madd_epi16(al, bl));
+    ab_hi = _mm_add_epi32(ab_hi, _mm_madd_epi16(ah, bh));
+  }
+  // Each vector below holds one statistic for blocks 0..3; transpose to records.
+  const __m128i f1 = _mm_madd_epi16(s1, ones16);
+  const __m128i f2 = _mm_madd_epi16(s2, ones16);
+  const __m128i fs = _mm_hadd_epi32(ss_lo, ss_hi);
+  const __m128i fa = _mm_hadd_epi32(ab_lo, ab_hi);
+  const __m128i t0 = _mm_unpacklo_epi32(f1, f2), t1 = _mm_unpacklo_epi32(fs, fa);
+  const __m128i t2 = _mm_unpackhi_epi32(f1, f2), t3 = _mm_unpackhi_epi32(fs, fa);
+  out[0] = _mm_unpacklo_epi64(t0, t1);
+  out[1] = _mm_unpackhi_epi64(t0, t1);
+  out[2] = _mm_unpacklo_epi64(t2, t3);
+  out[3] = _mm_unpackhi_epi64(t2, t3);
+}
+
+void ssim_4x4_row(const std::uint8_t* a, std::ptrdiff_t a_stride, const std::uint8_t* b,
+                  std::ptrdiff_t b_stride, int blocks, std::int32_t (*sums)[4]) {
+  __m128i g[4];
+  int i = 0;
+  for (; i + 4 <= blocks; i += 4) {
+    ssim_group(a + 4 * i, a_stride, b + 4 * i, b_stride, g);
+    for (int k = 0; k < 4; ++k) _mm_storeu_si128(reinterpret_cast<__m128i*>(sums[i + k]), g[k]);
+  }
+  if (i < blocks) {
+    // sums holds exactly `blocks` entries: store only those of the last group.
+    ssim_group(a + 4 * i, a_stride, b + 4 * i, b_stride, g);
+    for (int k = 0; i + k < blocks; ++k) {
+      _mm_storeu_si128(reinterpret_cast<__m128i*>(sums[i + k]), g[k]);
+    }
+  }
+}
+
 }  // namespace
 
 void fill_sse41(Table& t) {
   t.sse = &sse_row;
   t.sad = &sad_row;
+  t.ssim_4x4 = &ssim_4x4_row;
 }
 
 }  // namespace lanecast::kernels::metrics
