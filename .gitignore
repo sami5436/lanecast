@@ -1,0 +1,26 @@
+# Build trees
+build/
+build-*/
+cmake-build-*/
+compile_commands.json
+.cache/
+
+# Media outputs and test data
+*.y4m
+*.yuv
+*.raw
+*.nv12
+*.rgb
+*.ppm
+*.pgm
+*.pnm
+
+# Benchmark results
+bench/results/
+*.bench.json
+*.bench.csv
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
