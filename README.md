@@ -41,24 +41,25 @@ flowchart LR
     P --> Q2[["processed<br/>frame ring"]] --> W
 
     subgraph W["Writer thread"]
-        W1["writev() header + rows<br/>in one call"]
+        W1["writev() header + rows<br/>(a few calls per frame)"]
     end
 
     W --> OUT[("out.y4m / .rgb / .ppm<br/>or stdout")]
 ```
 
-Inside the process stage every filter works on a range of rows, so the thread
-pool can hand each core its own horizontal strip. Kernels only ever write the
-rows they own, which keeps slices independent.
+Inside the process stage every filter works on a range of output rows. Each
+frame is cut into small slices (32 rows by default) and idle workers claim the
+next slice from a shared counter, so fast cores take more slices and nobody
+waits on a straggler. Kernels only ever write the rows they own, which keeps
+slices independent.
 
 ```mermaid
-flowchart TB
-    F["1920x1080 yuv420p frame"] --> S1["rows 0-135"] & S2["rows 136-271"] & S3["..."] & S8["rows 944-1079"]
-    S1 --> K1["core 1"]
-    S2 --> K2["core 2"]
-    S3 --> K3["..."]
-    S8 --> K8["core N"]
-    K1 & K2 & K3 & K8 --> D["1280x720 rgb24 frame"]
+flowchart LR
+    F["1280x720 output frame<br/>cut into 32-row slices"] --> C[["next-slice counter<br/>(atomic)"]]
+    C -->|"claim rows 0-31"| K1["worker 1"]
+    C -->|"claim rows 32-63"| K2["worker 2"]
+    C -->|"claim rows 64-95"| K3["worker N"]
+    K1 & K2 & K3 -->|"claim again until<br/>the counter runs out"| C
 ```
 
 ### Scaling: two separable passes
