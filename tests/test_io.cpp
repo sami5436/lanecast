@@ -409,4 +409,136 @@ TEST(y4m_reader_reuses_the_frame_buffer) {
   CHECK(f.plane(1).data == first);
 }
 
+
+// ---- pnm ----
+
+TEST(pnm_round_trip) {
+  TempDir dir;
+  const std::pair<int, int> sizes[] = {{1, 1}, {3, 2}, {17, 9}, {64, 5}};
+  for (const auto& [w, h] : sizes) {
+    round_trip(dir.file("a.ppm"), make_info(PixelFormat::rgb24, w, h), ReaderOptions{}, 1, 3);
+    round_trip(dir.file("a.pgm"), make_info(PixelFormat::gray8, w, h), ReaderOptions{}, 1, 4);
+  }
+}
+
+TEST(pnm_concatenated_images) {
+  TempDir dir;
+  round_trip(dir.file("a.ppm"), make_info(PixelFormat::rgb24, 9, 4), ReaderOptions{}, 4, 11);
+}
+
+TEST(pnm_file_layout) {
+  TempDir dir;
+  std::unique_ptr<FrameWriter> writer;
+  REQUIRE_OK(open_writer(dir.file("a.ppm"), make_info(PixelFormat::rgb24, 2, 1), std::nullopt,
+                         writer));
+  REQUIRE_OK(writer->write(random_frame(PixelFormat::rgb24, 2, 1, 1)));
+  REQUIRE_OK(writer->finish());
+  // "P6\n2 1\n255\n" is 11 bytes, then 2 RGB pixels.
+  CHECK_EQ(fs::file_size(dir.file("a.ppm")), static_cast<std::uintmax_t>(11 + 6));
+}
+
+namespace {
+
+Status open_pnm_bytes(const TempDir& dir, const std::string& bytes,
+                      std::unique_ptr<FrameReader>& reader) {
+  write_bytes(dir.file("t.pnm"), bytes);
+  return open_reader(dir.file("t.pnm"), ReaderOptions{}, reader);
+}
+
+}  // namespace
+
+TEST(pnm_header_forms) {
+  TempDir dir;
+  std::unique_ptr<FrameReader> reader;
+  // Comments and mixed whitespace between fields, CRLF after the maxval.
+  REQUIRE_OK(open_pnm_bytes(
+      dir, "P5 # a comment\n# another\n2\t1\r\n255\r\n\x0a\x0b", reader));
+  CHECK(reader->info().format == PixelFormat::gray8);
+  CHECK_EQ(reader->info().width, 2);
+  Frame f;
+  // Exactly one byte ('\r') follows the maxval; the pixels are "\n\x0a" and the
+  // trailing whitespace byte is not another image.
+  REQUIRE_OK(reader->read(f));
+  CHECK_EQ(f.plane(0).row(0)[0], 0x0a);
+  CHECK_EQ(f.plane(0).row(0)[1], 0x0a);
+  CHECK_EQ(reader->read(f), Status::end_of_stream);
+
+  REQUIRE_OK(open_pnm_bytes(dir, "P6\n1 1\n255\n\x01\x02\x03", reader));
+  REQUIRE_OK(reader->read(f));
+  CHECK_EQ(f.plane(0).row(0)[2], 3);
+  CHECK_EQ(reader->read(f), Status::end_of_stream);
+}
+
+TEST(pnm_unsupported) {
+  TempDir dir;
+  std::unique_ptr<FrameReader> reader;
+  for (const char* magic : {"P1", "P2", "P3", "P4", "P7"}) {
+    CHECK_EQ(open_pnm_bytes(dir, std::string(magic) + "\n1 1\n255\n\x01\x02\x03", reader),
+             Status::unsupported_format);
+  }
+  CHECK_EQ(open_pnm_bytes(dir, "P6\n1 1\n65535\n123456", reader), Status::unsupported_format);
+  CHECK_EQ(open_pnm_bytes(dir, "P6\n1 1\n15\n123", reader), Status::unsupported_format);
+  CHECK_EQ(open_pnm_bytes(dir, "P5\n99999 1\n255\n", reader), Status::unsupported_format);
+}
+
+TEST(pnm_malformed) {
+  TempDir dir;
+  std::unique_ptr<FrameReader> reader;
+  Frame f;
+  CHECK_EQ(open_pnm_bytes(dir, "", reader), Status::parse_error);
+  CHECK_EQ(open_pnm_bytes(dir, "   \n", reader), Status::parse_error);
+  CHECK_EQ(open_pnm_bytes(dir, "Q6\n1 1\n255\n123", reader), Status::parse_error);
+  CHECK_EQ(open_pnm_bytes(dir, "P6", reader), Status::parse_error);
+  CHECK_EQ(open_pnm_bytes(dir, "P6\n1", reader), Status::parse_error);
+  CHECK_EQ(open_pnm_bytes(dir, "P6\n1 1\n", reader), Status::parse_error);
+  CHECK_EQ(open_pnm_bytes(dir, "P6\n1 x\n255\n123", reader), Status::parse_error);
+  CHECK_EQ(open_pnm_bytes(dir, "P6\n0 1\n255\n", reader), Status::parse_error);
+  CHECK_EQ(open_pnm_bytes(dir, "P6\n-1 1\n255\n", reader), Status::parse_error);
+  CHECK_EQ(open_pnm_bytes(dir, "P6\n1 1\n0\n123", reader), Status::parse_error);
+  CHECK_EQ(open_pnm_bytes(dir, "P6\n1 1\n999999\n123", reader), Status::parse_error);
+  CHECK_EQ(open_pnm_bytes(dir, "P6\n1 11111111111111111111111\n255\n", reader),
+           Status::parse_error);
+  CHECK_EQ(open_pnm_bytes(dir, "P6 # never ends", reader), Status::parse_error);
+
+  // Truncated pixels, in the first image and in a later one.
+  REQUIRE_OK(open_pnm_bytes(dir, "P6\n2 1\n255\n12345", reader));
+  CHECK_EQ(reader->read(f), Status::parse_error);
+  REQUIRE_OK(open_pnm_bytes(dir, "P5\n2 1\n255\n12P5\n2 1\n255\n1", reader));
+  REQUIRE_OK(reader->read(f));
+  CHECK_EQ(reader->read(f), Status::parse_error);
+  // A later image with a different shape.
+  REQUIRE_OK(open_pnm_bytes(dir, "P5\n2 1\n255\n12P5\n3 1\n255\n123", reader));
+  REQUIRE_OK(reader->read(f));
+  CHECK_EQ(reader->read(f), Status::parse_error);
+  REQUIRE_OK(open_pnm_bytes(dir, "P5\n2 1\n255\n12P6\n2 1\n255\n123456", reader));
+  REQUIRE_OK(reader->read(f));
+  CHECK_EQ(reader->read(f), Status::parse_error);
+}
+
+TEST(pnm_writer_rejects_unsupported) {
+  TempDir dir;
+  std::unique_ptr<FrameWriter> writer;
+  for (const PixelFormat fmt : {PixelFormat::yuv420p, PixelFormat::nv12, PixelFormat::rgba,
+                                PixelFormat::bgra}) {
+    CHECK_EQ(open_writer(dir.file("a.ppm"), make_info(fmt, 4, 4), std::nullopt, writer),
+             Status::unsupported_format);
+  }
+}
+
+TEST(explicit_container_overrides_extension) {
+  TempDir dir;
+  const VideoInfo info = make_info(PixelFormat::rgb24, 4, 3);
+  std::unique_ptr<FrameWriter> writer;
+  REQUIRE_OK(open_writer(dir.file("a.dat"), info, Container::pnm, writer));
+  REQUIRE_OK(writer->write(random_frame(info.format, 4, 3, 1)));
+  REQUIRE_OK(writer->finish());
+  ReaderOptions opts;
+  opts.container = Container::pnm;
+  std::unique_ptr<FrameReader> reader;
+  REQUIRE_OK(open_reader(dir.file("a.dat"), opts, reader));
+  Frame f;
+  REQUIRE_OK(reader->read(f));
+  CHECK(first_difference(random_frame(info.format, 4, 3, 1), f).empty());
+}
+
 }  // namespace lanecast::test

@@ -110,7 +110,7 @@ Status open_reader(const std::string& path, const ReaderOptions& opts,
   switch (*container) {
     case Container::y4m: return io_detail::open_y4m_reader(path, out);
     case Container::raw: return io_detail::open_raw_reader(path, opts.raw, out);
-    case Container::pnm: return Status::not_implemented;
+    case Container::pnm: return io_detail::open_pnm_reader(path, out);
   }
   return Status::invalid_argument;
 }
@@ -122,7 +122,7 @@ Status open_writer(const std::string& path, const VideoInfo& info,
   switch (*resolved) {
     case Container::y4m: return io_detail::open_y4m_writer(path, info, out);
     case Container::raw: return io_detail::open_raw_writer(path, info, out);
-    case Container::pnm: return Status::not_implemented;
+    case Container::pnm: return io_detail::open_pnm_writer(path, info, out);
   }
   return Status::invalid_argument;
 }
