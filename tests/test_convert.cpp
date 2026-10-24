@@ -580,3 +580,50 @@ TEST(every_pair_row_ranges_and_isas_match) {
     }
   }
 }
+
+namespace {
+
+// PSNR of rgb24 -> yuv420p -> rgb24 with one chroma mode and siting.
+double round_trip_psnr(const Frame& img, ChromaMode mode, ChromaLocation loc) {
+  Frame yuv, back;
+  REQUIRE_OK(Frame::allocate(PixelFormat::yuv420p, img.width(), img.height(), yuv));
+  REQUIRE_OK(Frame::allocate(PixelFormat::rgb24, img.width(), img.height(), back));
+  const ConvertOptions o{ColorMatrix::bt709, ColorRange::limited, mode, loc};
+  REQUIRE_OK(convert(img, yuv, o));
+  REQUIRE_OK(convert(yuv, back, o));
+  double sse = 0;
+  for (int y = 0; y < img.height(); ++y) {
+    for (int x = 0; x < img.width(); ++x) {
+      const Rgb a = pixel(img, x, y), b = pixel(back, x, y);
+      sse += (a.r - b.r) * (a.r - b.r) + (a.g - b.g) * (a.g - b.g) + (a.b - b.b) * (a.b - b.b);
+    }
+  }
+  return 10.0 * std::log10(255.0 * 255.0 / std::max(sse / (3.0 * img.width() * img.height()), 1e-9));
+}
+
+}  // namespace
+
+TEST(bilinear_round_trip_beats_nearest_on_sharp_edges) {
+  // Edges on odd coordinates, so no chroma sample sits on a clean boundary,
+  // plus 5-pixel color checkerboards.
+  Frame edges, checks;
+  REQUIRE_OK(Frame::allocate(PixelFormat::rgb24, 96, 64, edges));
+  REQUIRE_OK(Frame::allocate(PixelFormat::rgb24, 96, 64, checks));
+  for (int y = 0; y < 64; ++y) {
+    for (int x = 0; x < 96; ++x) {
+      Rgb c = x < 41 ? Rgb{220, 40, 30} : Rgb{20, 60, 230};
+      if (y >= 29) c = {c.g, c.b, c.r};
+      set_pixel(edges, x, y, c);
+      set_pixel(checks, x, y, ((x / 5 + y / 5) & 1) ? Rgb{240, 200, 20} : Rgb{30, 40, 200});
+    }
+  }
+  for (const ChromaLocation loc : kLocations) {
+    for (const Frame* img : {&edges, &checks}) {
+      const double nearest = round_trip_psnr(*img, ChromaMode::nearest, loc);
+      const double bilinear = round_trip_psnr(*img, ChromaMode::bilinear, loc);
+      CHECK_MSG(bilinear >= nearest, "bilinear " + std::to_string(bilinear) + " dB < nearest " +
+                                         std::to_string(nearest) + " dB, loc " +
+                                         std::to_string(static_cast<int>(loc)));
+    }
+  }
+}
