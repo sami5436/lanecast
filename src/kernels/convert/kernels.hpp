@@ -96,6 +96,8 @@ void fill_sse41_yuv2rgb(Table& t);
 void fill_sse41_rgb2yuv(Table& t);
 void fill_avx2_yuv2rgb(Table& t);
 void fill_avx2_rgb2yuv(Table& t);
+void fill_sse41_fast(Table& t);
+void fill_avx2_fast(Table& t);
 
 // Table for a tier (clamped to what is supported). Built once, thread-safe.
 const Table& table(Isa isa);
