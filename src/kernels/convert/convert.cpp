@@ -73,7 +73,7 @@ Status convert(const Frame& src, Frame& dst, const ConvertOptions& opts, RowRang
   }
   if (!convert_supported(src.format(), dst.format())) return Status::not_implemented;
   RowRange r;
-  if (const Status s = resolve_rows(dst, rows, r); s != Status::ok) return s;
+  if (const Status s = resolve_rows(src, rows, r); s != Status::ok) return s;
   return yuv_to_packed(src, dst, opts, r, packed_index(dst.format()));
 }
 
