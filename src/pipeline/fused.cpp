@@ -65,12 +65,44 @@ Status build_job(PixelFormat format, int plane, int src_w, int src_h, int dst_w,
   return Status::ok;
 }
 
+PixelFormat packed_format(int packed) noexcept {
+  return packed == kernels::convert::kRgb24  ? PixelFormat::rgb24
+         : packed == kernels::convert::kRgba ? PixelFormat::rgba
+                                             : PixelFormat::bgra;
+}
+
 int packed_index(PixelFormat f) noexcept {
   switch (f) {
     case PixelFormat::rgb24: return kernels::convert::kRgb24;
     case PixelFormat::rgba: return kernels::convert::kRgba;
     case PixelFormat::bgra: return kernels::convert::kBgra;
     default: return -1;
+  }
+}
+
+// Scales destination rows [o0, o1) of one plane into `out`, rows out_stride
+// apart, with the Scaler's ring of horizontally scaled rows in `scratch`.
+void scale_rows(const PlaneJob& j, const kernels::scale::Table& t, const Plane& sp, int o0,
+                int o1, std::uint8_t* out, std::uint8_t* scratch) {
+  const int taps = j.hy.taps;
+  auto** ptrs = reinterpret_cast<const std::int16_t**>(scratch);
+  auto* ring = reinterpret_cast<std::int16_t*>(
+      scratch + align64(static_cast<std::size_t>(taps) * sizeof(void*)));
+  const auto hscale = t.hscale[j.channels];
+  const int count = j.dst_w * j.channels;
+  int have_end = 0;  // source rows below this are already in the ring
+  for (int o = o0; o < o1; ++o) {
+    const int s0 = j.hy.start[static_cast<std::size_t>(o)];
+    for (int sr = std::max(s0, have_end); sr < s0 + taps; ++sr) {
+      hscale(sp.row(sr), ring + static_cast<std::size_t>(sr % taps) * j.mid_stride, j.dst_w,
+             j.hview);
+    }
+    have_end = s0 + taps;
+    for (int k = 0; k < taps; ++k) {
+      ptrs[k] = ring + static_cast<std::size_t>((s0 + k) % taps) * j.mid_stride;
+    }
+    t.vscale(ptrs, j.hy.weights.data() + static_cast<std::size_t>(o) * taps, taps,
+             out + static_cast<std::size_t>(o - o0) * j.out_stride, count);
   }
 }
 
@@ -125,17 +157,76 @@ Status ScaleConvert::create(PixelFormat src_format, int src_width, int src_heigh
 }
 
 Status ScaleConvert::run(const Frame& src, Frame& dst, RowRange rows) const {
-  (void)src;
-  (void)dst;
-  (void)rows;
-  return Status::not_implemented;
+  const Impl& m = *impl_;
+  if (src.empty() || dst.empty() || src.format() != m.src_format ||
+      dst.format() != packed_format(m.packed) || src.width() != m.src_w ||
+      src.height() != m.src_h || dst.width() != m.dst_w || dst.height() != m.dst_h) {
+    return Status::invalid_argument;
+  }
+  // Same alignment as convert on the intermediate 4:2:0 frame.
+  const int end = rows.end < 0 ? m.dst_h : rows.end;
+  if (rows.begin < 0 || rows.begin > end || end > m.dst_h || (rows.begin & 1) != 0 ||
+      ((end & 1) != 0 && end != m.dst_h)) {
+    return Status::invalid_argument;
+  }
+
+  const bool nv12 = m.src_format == PixelFormat::nv12;
+  const bool bilinear = m.opts.chroma == ChromaMode::bilinear;
+  const auto& st = kernels::scale::active_table();
+  const auto& ct = kernels::convert::active_table();
+  const YuvToRgbCoeffs c = yuv_to_rgb_coeffs(m.opts.matrix, m.opts.range);
+  const int ch = plane_height(m.src_format, 1, m.dst_h);
+  const std::size_t luma_bytes = static_cast<std::size_t>(kStripRows) * m.luma.out_stride;
+  const std::size_t plane_bytes = m.chroma_rows * m.chroma.out_stride;
+  std::uint8_t* ring = detail::thread_scratch(0, m.ring_bytes);
+  std::uint8_t* ybuf = detail::thread_scratch(1, luma_bytes);
+  std::uint8_t* ubuf = detail::thread_scratch(2, nv12 ? plane_bytes : 2 * plane_bytes);
+  if (ring == nullptr || ybuf == nullptr || ubuf == nullptr) return Status::out_of_memory;
+  std::uint8_t* vbuf = ubuf + plane_bytes;
+
+  const Plane dp = dst.plane(0);
+  for (int a = rows.begin; a < end; a += kStripRows) {
+    const int b = std::min(a + kStripRows, end);
+    // Chroma rows this strip's luma rows read (one more each side for bilinear).
+    const int c0 = std::max((a >> 1) - (bilinear ? 1 : 0), 0);
+    const int c1 = std::min(((b + 1) >> 1) + (bilinear ? 1 : 0), ch);
+    scale_rows(m.luma, st, src.plane(0), a, b, ybuf, ring);
+    scale_rows(m.chroma, st, src.plane(1), c0, c1, ubuf, ring);
+    if (!nv12) scale_rows(m.chroma, st, src.plane(2), c0, c1, vbuf, ring);
+    const auto crow = [&](std::uint8_t* base, int row) {
+      return base + static_cast<std::size_t>(row - c0) * m.chroma.out_stride;
+    };
+    for (int y = a; y < b; ++y) {
+      const int cy = y >> 1;
+      const int cyn = std::clamp(cy + ((y & 1) ? 1 : -1), 0, ch - 1);
+      const std::uint8_t* yr = ybuf + static_cast<std::size_t>(y - a) * m.luma.out_stride;
+      std::uint8_t* out = dp.row(y);
+      if (nv12 && bilinear) {
+        const auto fn = ct.nv12_bilinear_to_packed[m.packed];
+        if (fn == nullptr) return Status::not_implemented;
+        fn(yr, crow(ubuf, cy), crow(ubuf, cyn), out, m.dst_w, c, m.opts.chroma_loc);
+      } else if (nv12) {
+        const auto fn = ct.nv12_to_packed[m.packed];
+        if (fn == nullptr) return Status::not_implemented;
+        fn(yr, crow(ubuf, cy), out, m.dst_w, c);
+      } else if (bilinear) {
+        const auto fn = ct.yuv420_bilinear_to_packed[m.packed];
+        if (fn == nullptr) return Status::not_implemented;
+        fn(yr, crow(ubuf, cy), crow(ubuf, cyn), crow(vbuf, cy), crow(vbuf, cyn), out, m.dst_w, c,
+           m.opts.chroma_loc);
+      } else {
+        const auto fn = ct.yuv420_to_packed[m.packed];
+        if (fn == nullptr) return Status::not_implemented;
+        fn(yr, crow(ubuf, cy), crow(vbuf, cy), out, m.dst_w, c);
+      }
+    }
+  }
+  return Status::ok;
 }
 
 Status ScaleConvert::run(const Frame& src, Frame& dst, ThreadPool* pool) const {
-  (void)src;
-  (void)dst;
-  (void)pool;
-  return Status::not_implemented;
+  return run_sliced(
+      pool, impl_->dst_h, 2, [&](RowRange r) { return run(src, dst, r); }, kStripRows);
 }
 
 }  // namespace lanecast
