@@ -83,11 +83,65 @@ std::uint64_t sad_row(const std::uint8_t* a, const std::uint8_t* b, int count) {
          static_cast<std::uint64_t>(_mm_extract_epi64(r, 1));
 }
 
+// Sums for 8 adjacent 4x4 blocks (32 columns). Everything runs per 128 bit
+// lane, so out[k] holds block k in its low lane and block 4 + k in its high
+// lane as {sum a, sum b, sum a^2 + b^2, sum a*b}.
+inline void ssim_group(const std::uint8_t* a, std::ptrdiff_t a_stride, const std::uint8_t* b,
+                       std::ptrdiff_t b_stride, __m256i out[4]) {
+  const __m256i zero = _mm256_setzero_si256();
+  const __m256i ones8 = _mm256_set1_epi8(1);
+  const __m256i ones16 = _mm256_set1_epi16(1);
+  __m256i s1 = zero, s2 = zero, ss_lo = zero, ss_hi = zero, ab_lo = zero, ab_hi = zero;
+  for (int y = 0; y < 4; ++y, a += a_stride, b += b_stride) {
+    const __m256i va = load(a);
+    const __m256i vb = load(b);
+    s1 = _mm256_add_epi16(s1, _mm256_maddubs_epi16(va, ones8));
+    s2 = _mm256_add_epi16(s2, _mm256_maddubs_epi16(vb, ones8));
+    const __m256i al = _mm256_unpacklo_epi8(va, zero), ah = _mm256_unpackhi_epi8(va, zero);
+    const __m256i bl = _mm256_unpacklo_epi8(vb, zero), bh = _mm256_unpackhi_epi8(vb, zero);
+    ss_lo = _mm256_add_epi32(
+        ss_lo, _mm256_add_epi32(_mm256_madd_epi16(al, al), _mm256_madd_epi16(bl, bl)));
+    ss_hi = _mm256_add_epi32(
+        ss_hi, _mm256_add_epi32(_mm256_madd_epi16(ah, ah), _mm256_madd_epi16(bh, bh)));
+    ab_lo = _mm256_add_epi32(ab_lo, _mm256_madd_epi16(al, bl));
+    ab_hi = _mm256_add_epi32(ab_hi, _mm256_madd_epi16(ah, bh));
+  }
+  const __m256i f1 = _mm256_madd_epi16(s1, ones16);
+  const __m256i f2 = _mm256_madd_epi16(s2, ones16);
+  const __m256i fs = _mm256_hadd_epi32(ss_lo, ss_hi);
+  const __m256i fa = _mm256_hadd_epi32(ab_lo, ab_hi);
+  const __m256i t0 = _mm256_unpacklo_epi32(f1, f2), t1 = _mm256_unpacklo_epi32(fs, fa);
+  const __m256i t2 = _mm256_unpackhi_epi32(f1, f2), t3 = _mm256_unpackhi_epi32(fs, fa);
+  out[0] = _mm256_unpacklo_epi64(t0, t1);
+  out[1] = _mm256_unpackhi_epi64(t0, t1);
+  out[2] = _mm256_unpacklo_epi64(t2, t3);
+  out[3] = _mm256_unpackhi_epi64(t2, t3);
+}
+
+void ssim_4x4_row(const std::uint8_t* a, std::ptrdiff_t a_stride, const std::uint8_t* b,
+                  std::ptrdiff_t b_stride, int blocks, std::int32_t (*sums)[4]) {
+  __m256i g[4];
+  for (int i = 0; i < blocks; i += 8) {
+    ssim_group(a + 4 * i, a_stride, b + 4 * i, b_stride, g);
+    // sums holds exactly `blocks` entries: store only those that exist.
+    for (int k = 0; k < 4; ++k) {
+      if (i + k < blocks) {
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(sums[i + k]), _mm256_castsi256_si128(g[k]));
+      }
+      if (i + 4 + k < blocks) {
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(sums[i + 4 + k]),
+                         _mm256_extracti128_si256(g[k], 1));
+      }
+    }
+  }
+}
+
 }  // namespace
 
 void fill_avx2(Table& t) {
   t.sse = &sse_row;
   t.sad = &sad_row;
+  t.ssim_4x4 = &ssim_4x4_row;
 }
 
 }  // namespace lanecast::kernels::metrics
