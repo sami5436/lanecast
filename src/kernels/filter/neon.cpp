@@ -115,12 +115,45 @@ void blur_v_row(const std::uint16_t* const* rows, std::uint8_t* dst, int count, 
   }
 }
 
+// 256-entry table held in 16 registers; vqtbl4q covers 64 entries, so four
+// lookups with the index offset per quarter are merged by vqtbx4q (out of
+// range lanes keep the previous result).
+struct LutRegs {
+  uint8x16x4_t q[4];
+  explicit LutRegs(const std::uint8_t* lut) {
+    for (int i = 0; i < 4; ++i) q[i] = vld1q_u8_x4(lut + 64 * i);
+  }
+  uint8x16_t operator()(uint8x16_t x) const {
+    uint8x16_t r = vqtbl4q_u8(q[0], x);
+    r = vqtbx4q_u8(r, q[1], vsubq_u8(x, vdupq_n_u8(64)));
+    r = vqtbx4q_u8(r, q[2], vsubq_u8(x, vdupq_n_u8(128)));
+    return vqtbx4q_u8(r, q[3], vsubq_u8(x, vdupq_n_u8(192)));
+  }
+};
+
+void lut_row(const std::uint8_t* src, std::uint8_t* dst, int count, const std::uint8_t* lut) {
+  const LutRegs apply(lut);
+  for (int i = 0; i < count; i += 16) vst1q_u8(dst + i, apply(vld1q_u8(src + i)));
+}
+
+void lut_skip_alpha_row(const std::uint8_t* src, std::uint8_t* dst, int pixels,
+                        const std::uint8_t* lut) {
+  const LutRegs apply(lut);
+  for (int i = 0; i < pixels; i += 16, src += 64, dst += 64) {
+    uint8x16x4_t p = vld4q_u8(src);
+    for (int c = 0; c < 3; ++c) p.val[c] = apply(p.val[c]);
+    vst4q_u8(dst, p);
+  }
+}
+
 }  // namespace
 
 void fill_neon(Table& t) {
   t.blend = &blend_row;
   t.blur_h = &blur_h_row;
   t.blur_v = &blur_v_row;
+  t.lut = &lut_row;
+  t.lut_skip_alpha = &lut_skip_alpha_row;
 }
 
 }  // namespace lanecast::kernels::filter
