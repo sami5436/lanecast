@@ -30,6 +30,8 @@ struct Layout<kBgra> {
 template <int P>
 inline void store_rgb(std::uint8_t* d, int yv, int u, int v, const YuvToRgbCoeffs& c) {
   using L = Layout<P>;
+  u -= 128;
+  v -= 128;
   const int ly = c.cy * (yv - c.y_offset) + 4096;
   d[L::r] = clamp8((ly + c.crv * v) >> 13);
   d[L::g] = clamp8((ly - c.cgu * u - c.cgv * v) >> 13);
