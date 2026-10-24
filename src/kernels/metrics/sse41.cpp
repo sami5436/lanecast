@@ -65,8 +65,24 @@ std::uint64_t sse_row(const std::uint8_t* a, const std::uint8_t* b, int count) {
   return total;
 }
 
+std::uint64_t sad_row(const std::uint8_t* a, const std::uint8_t* b, int count) {
+  __m128i acc = _mm_setzero_si128();  // two u64 partial sums
+  for (; count >= 16; count -= 16, a += 16, b += 16) {
+    acc = _mm_add_epi64(acc, _mm_sad_epu8(load(a), load(b)));
+  }
+  if (count > 0) {
+    const __m128i m = tail_mask(count);
+    acc = _mm_add_epi64(acc, _mm_sad_epu8(_mm_and_si128(load(a), m), _mm_and_si128(load(b), m)));
+  }
+  return static_cast<std::uint64_t>(_mm_cvtsi128_si64(acc)) +
+         static_cast<std::uint64_t>(_mm_extract_epi64(acc, 1));
+}
+
 }  // namespace
 
-void fill_sse41(Table& t) { t.sse = &sse_row; }
+void fill_sse41(Table& t) {
+  t.sse = &sse_row;
+  t.sad = &sad_row;
+}
 
 }  // namespace lanecast::kernels::metrics
