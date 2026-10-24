@@ -20,8 +20,9 @@
 //   area (box coverage, like SWS_AREA for downscale). Output o covers
 //   [o * src, (o + 1) * src) and source i covers [i * dst, (i + 1) * dst):
 //     overlap_i = max(0, min((o+1)*src, (i+1)*dst) - max(o*src, i*dst))
-//     w_i = (overlap_i * 16384 + src / 2) / src
-//     then add (16384 - sum w_i) to the largest w_i (lowest i on ties).
+//     w_i = floor(overlap_i * 16384 / src)
+//     then add 1 to each of the (16384 - sum w_i) taps with the largest
+//     remainders overlap_i * 16384 % src (lowest i on ties), so w_i >= 0.
 //   Packing: taps = max contributing taps over all o (bilinear: min(2, src)).
 //   Taps whose index is outside [0, src) merge into the nearest valid index.
 //   start[o] = min(first contributing index, src - taps); unused slots are 0.
