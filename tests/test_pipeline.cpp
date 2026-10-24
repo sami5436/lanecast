@@ -1,8 +1,10 @@
 // pipeline suite: thread pool, row slicing, filter chain parsing, Pipeline.
 #include <atomic>
+#include <chrono>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "lanecast/pipeline.hpp"
@@ -338,6 +340,148 @@ TEST(PipelineProcessRejectsMismatchedInput) {
   CHECK_EQ(p->process(wrong_format, out), Status::invalid_argument);
   Frame empty;
   CHECK_EQ(p->process(empty, out), Status::invalid_argument);
+}
+
+// Deterministic frames, with optional failures at a given frame index.
+class FakeReader final : public FrameReader {
+ public:
+  FakeReader(const VideoInfo& info, int frames) : info_(info), frames_(frames) {}
+  int fail_at = -1;      // read returns parse_error for this frame
+  int wrong_size_at = -1;  // returns a frame of another size (process rejects it)
+  const VideoInfo& info() const override { return info_; }
+  Status read(Frame& frame) override {
+    if (next_ >= frames_) return Status::end_of_stream;
+    const int i = next_++;
+    if (i == fail_at) return Status::parse_error;
+    const int w = i == wrong_size_at ? info_.width + 2 : info_.width;
+    Frame f = test::random_frame(info_.format, w, info_.height, 1000 + static_cast<std::uint64_t>(i));
+    frame = std::move(f);  // a real reader reuses the buffer; content is what matters here
+    return Status::ok;
+  }
+
+ private:
+  VideoInfo info_;
+  int frames_;
+  int next_ = 0;
+};
+
+class RecordingWriter final : public FrameWriter {
+ public:
+  int fail_at = -1;  // write returns io_error for this frame
+  bool slow = false;
+  std::string bytes;
+  Status write(const Frame& frame) override {
+    if (slow) std::this_thread::sleep_for(std::chrono::microseconds(300));
+    if (count_++ == fail_at) return Status::io_error;
+    for (int p = 0; p < frame.plane_count(); ++p) {
+      const Plane pl = frame.plane(p);
+      for (int y = 0; y < pl.height; ++y) {
+        bytes.append(reinterpret_cast<const char*>(pl.row(y)), static_cast<std::size_t>(pl.row_bytes()));
+      }
+    }
+    return Status::ok;
+  }
+  Status finish() override { return Status::ok; }
+
+ private:
+  int count_ = 0;
+};
+
+struct StreamRun {
+  StreamResult result;
+  std::string bytes;
+};
+
+StreamRun run_fake(const char* chain, int threads, int frames, bool overlap, int depth,
+                   int read_fail, int write_fail, int wrong_size = -1, long long max_frames = -1,
+                   bool slow = false) {
+  const VideoInfo vi = info_of(PixelFormat::yuv420p, 38, 22);
+  FakeReader reader(vi, frames);
+  reader.fail_at = read_fail;
+  reader.wrong_size_at = wrong_size;
+  auto p = make_pipeline(chain, vi, threads);
+  RecordingWriter writer;
+  writer.fail_at = write_fail;
+  writer.slow = slow;
+  StreamOptions so;
+  so.overlap = overlap;
+  so.depth = depth;
+  so.max_frames = max_frames;
+  StreamRun r;
+  r.result = run_stream(reader, *p, writer, so);
+  r.bytes = std::move(writer.bytes);
+  return r;
+}
+
+void check_same_as_serial(const char* chain, int threads, int frames, int depth, int read_fail,
+                          int write_fail, int wrong_size = -1, long long max_frames = -1,
+                          bool slow = false) {
+  const StreamRun a = run_fake(chain, threads, frames, false, 1, read_fail, write_fail, wrong_size, max_frames);
+  const StreamRun b = run_fake(chain, threads, frames, true, depth, read_fail, write_fail, wrong_size, max_frames, slow);
+  const std::string tag = std::string(chain) + " frames " + std::to_string(frames) + " depth " +
+                          std::to_string(depth);
+  CHECK_MSG(a.bytes == b.bytes, tag + ": output bytes differ");
+  CHECK_MSG(a.result.status == b.result.status, tag + ": status differs");
+  CHECK_MSG(a.result.stage == b.result.stage, tag + ": stage differs");
+  CHECK_MSG(a.result.frames == b.result.frames, tag + ": frame count differs");
+  CHECK_MSG(a.result.failed_frame == b.result.failed_frame, tag + ": failed frame differs");
+}
+
+TEST(StreamOverlapMatchesSerial) {
+  for (const char* chain : {"", "scale=21:13,format=rgb24"}) {
+    for (const int threads : {1, 0}) {
+      for (const int frames : {0, 1, 2, 3, 7, 25}) {
+        for (const int depth : {2, 3, 6}) {
+          check_same_as_serial(chain, threads, frames, depth, -1, -1);
+        }
+      }
+    }
+  }
+  const StreamRun full = run_fake("format=rgb24", 0, 9, true, 3, -1, -1);
+  CHECK_EQ(full.result.status, Status::ok);
+  CHECK_EQ(full.result.frames, 9);
+  CHECK_EQ(full.bytes.size(), static_cast<std::size_t>(9 * 38 * 22 * 3));
+}
+
+TEST(StreamStopsAtMaxFrames) {
+  for (const long long cap : {1LL, 4LL, 40LL}) {
+    check_same_as_serial("format=rgb24", 0, 11, 3, -1, -1, -1, cap);
+  }
+  CHECK_EQ(run_fake("", 1, 11, true, 3, -1, -1, -1, 4).result.frames, 4);
+}
+
+TEST(StreamEarlyWriteErrorMatchesSerial) {
+  for (const int fail : {0, 1, 5, 19}) {
+    for (const int depth : {2, 3, 8}) {
+      check_same_as_serial("scale=21:13,format=rgb24", 0, 20, depth, -1, fail);
+      check_same_as_serial("scale=21:13,format=rgb24", 1, 20, depth, -1, fail, -1, -1, true);
+    }
+  }
+  const StreamRun r = run_fake("format=rgb24", 0, 200, true, 3, -1, 3);
+  CHECK_EQ(r.result.status, Status::io_error);
+  CHECK(r.result.stage == StreamResult::Stage::write);
+  CHECK_EQ(r.result.failed_frame, 3);
+  CHECK_EQ(r.result.frames, 3);
+}
+
+TEST(StreamReadAndProcessErrorsMatchSerial) {
+  for (const int depth : {2, 3, 8}) {
+    check_same_as_serial("format=rgb24", 0, 20, depth, 6, -1);
+    check_same_as_serial("format=rgb24", 0, 20, depth, 0, -1);
+    check_same_as_serial("format=rgb24", 0, 20, depth, -1, -1, 4);
+    // The write error is the earlier frame, so it wins over a later read error.
+    check_same_as_serial("format=rgb24", 0, 20, depth, 12, 2);
+    // A read error at an earlier frame than a write error wins.
+    check_same_as_serial("format=rgb24", 0, 20, depth, 2, 9);
+  }
+  const StreamRun r = run_fake("format=rgb24", 0, 20, true, 3, 6, -1);
+  CHECK_EQ(r.result.status, Status::parse_error);
+  CHECK(r.result.stage == StreamResult::Stage::read);
+  CHECK_EQ(r.result.frames, 6);
+  const StreamRun q = run_fake("format=rgb24", 0, 20, true, 3, -1, -1, 4);
+  CHECK_EQ(q.result.status, Status::invalid_argument);
+  CHECK(q.result.stage == StreamResult::Stage::process);
+  CHECK_EQ(q.result.frames, 4);
 }
 
 }  // namespace

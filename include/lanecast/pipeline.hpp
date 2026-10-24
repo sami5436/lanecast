@@ -17,6 +17,7 @@
 
 #include "lanecast/convert.hpp"
 #include "lanecast/frame.hpp"
+#include "lanecast/io.hpp"
 #include "lanecast/scale.hpp"
 #include "lanecast/status.hpp"
 
@@ -151,5 +152,35 @@ class Pipeline {
   explicit Pipeline(std::unique_ptr<Impl> impl);
   std::unique_ptr<Impl> impl_;
 };
+
+struct StreamOptions {
+  long long max_frames = -1;  // stop after this many frames; < 0 for all
+  // true: a reader thread, the calling thread (processing) and a writer
+  // thread run concurrently, joined by small rings of preallocated frames, so
+  // frame N+1 is read while N is processed and N-1 is written. false: read,
+  // process and write run one after another on the calling thread. Both
+  // produce the same bytes and the same status.
+  bool overlap = true;
+  int depth = 3;  // frames in flight per ring when overlapping, >= 2
+};
+
+struct StreamResult {
+  enum class Stage : std::uint8_t { none, read, process, write };
+  Status status = Status::ok;
+  Stage stage = Stage::none;     // where status came from
+  long long frames = 0;          // frames fully written
+  long long failed_frame = -1;   // index of the frame that failed
+  double process_seconds = 0;    // time spent in Pipeline::process
+};
+
+// Streams frames reader -> pipeline -> writer until end of input,
+// max_frames or the first error, which is the failure of the earliest frame
+// (read before process before write for the same frame). Frames before it
+// are still written, so the output matches a serial run. After an error the
+// stages stop promptly; the caller still owns finishing the writer. No
+// per-frame allocation: frames are reused through the rings. Input must be
+// the shape the pipeline was created for.
+StreamResult run_stream(FrameReader& reader, Pipeline& pipeline, FrameWriter& writer,
+                        const StreamOptions& opts = {});
 
 }  // namespace lanecast

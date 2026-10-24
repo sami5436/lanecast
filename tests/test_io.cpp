@@ -2,12 +2,17 @@
 // Round trips go through real files in a scratch directory that is removed
 // afterwards. Header and truncation cases write their bytes in-test, so no
 // fixture files and no external tools are needed.
+#include <sys/stat.h>
+#include <unistd.h>
+
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <memory>
 #include <string>
+#include <thread>
 
 #include "lanecast/io.hpp"
 #include "test_support.hpp"
@@ -111,6 +116,58 @@ TEST(raw_round_trip_all_formats) {
       round_trip(dir.file("a.yuv"), info, opts, 3, 100);
     }
   }
+}
+
+// More rows than IOV_MAX, so reads and writes need several vectored calls.
+TEST(tall_frames_round_trip) {
+  TempDir dir;
+  for (const PixelFormat fmt : {PixelFormat::gray8, PixelFormat::yuv420p, PixelFormat::rgb24}) {
+    const VideoInfo info = make_info(fmt, 9, 2601);
+    ReaderOptions opts;
+    opts.raw = info;
+    round_trip(dir.file("a.yuv"), info, opts, 2, 7);
+  }
+  const VideoInfo y4m = make_info(PixelFormat::yuv420p, 8, 2600);
+  round_trip(dir.file("a.y4m"), y4m, ReaderOptions{}, 2, 9);
+}
+
+// A pipe delivers short reads at arbitrary offsets, including inside the
+// y4m header and FRAME lines.
+TEST(y4m_reads_from_a_slow_fifo) {
+  TempDir dir;
+  const VideoInfo info = make_info(PixelFormat::yuv420p, 30, 20);
+  std::unique_ptr<FrameWriter> writer;
+  REQUIRE_OK(open_writer(dir.file("a.y4m"), info, std::nullopt, writer));
+  std::vector<Frame> frames;
+  for (int i = 0; i < 3; ++i) {
+    frames.push_back(random_frame(info.format, 30, 20, 40 + i));
+    REQUIRE_OK(writer->write(frames.back()));
+  }
+  REQUIRE_OK(writer->finish());
+  std::string bytes;
+  {
+    std::ifstream in(dir.file("a.y4m"), std::ios::binary);
+    bytes.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+  }
+
+  const std::string fifo = dir.file("pipe.y4m");
+  REQUIRE(mkfifo(fifo.c_str(), 0600) == 0);
+  std::thread feeder([&] {
+    std::ofstream out(fifo, std::ios::binary);
+    for (std::size_t pos = 0; pos < bytes.size(); pos += 37) {
+      out.write(bytes.data() + pos, static_cast<std::streamsize>(std::min<std::size_t>(37, bytes.size() - pos)));
+      out.flush();
+    }
+  });
+  std::unique_ptr<FrameReader> reader;
+  REQUIRE_OK(open_reader(fifo, ReaderOptions{}, reader));
+  Frame got;
+  for (std::size_t i = 0; i < frames.size(); ++i) {
+    REQUIRE_OK(reader->read(got));
+    CHECK(first_difference(frames[i], got).empty());
+  }
+  CHECK_EQ(reader->read(got), Status::end_of_stream);
+  feeder.join();
 }
 
 TEST(raw_file_is_tightly_packed) {
