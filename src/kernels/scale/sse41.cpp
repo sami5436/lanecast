@@ -249,6 +249,7 @@ void fill_sse41(Table& t) {
   t.hscale[3] = &hscale3;
   t.hscale[4] = &hscale4;
   t.vscale = &vscale;
+  fill_sse41_q7(t);
 }
 
 }  // namespace lanecast::kernels::scale
