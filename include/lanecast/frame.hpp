@@ -12,9 +12,10 @@
 //      load and store (up to 64 bytes past the end) instead of a scalar tail.
 //   4. Padding contents are unspecified. No result may depend on them; the
 //      tests poison padding with random bytes to enforce this.
-//   5. Kernels never read or write outside the rows they were asked for
-//      (no vertical overread), so slices on different threads never touch
-//      the same bytes.
+//   5. Kernels never write outside the rows they were asked for, so slices
+//      on different threads never write the same bytes. They may read
+//      neighbor source rows (filter taps, bilinear chroma), which is safe
+//      because sources are read-only during a call.
 // Freshly allocated frames are zero-filled.
 #pragma once
 
