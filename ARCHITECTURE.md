@@ -132,6 +132,9 @@ metrics: compute_psnr / compute_ssim(a, b) -> integer sums per row -> double mat
   Chroma is bilinear by default (nearest optional), sited left or center
   per `ChromaLocation`. Coefficient tables for BT.601/BT.709 x limited/full are
   constexpr in the header and fit int16.
+  `precision = fast` (nearest chroma only) uses a separate 16-bit contract
+  built on rounding high-half multiplies (vqrdmulh, pmulhrsw), within one
+  level of exact; the NEON tier with FEAT_RDM fuses the multiply and add.
 - **RGB to YUV** (convert.hpp): Q15, `Y = clamp8((yr*R + yg*G + yb*B +
   (yoff << 15) + 16384) >> 15)`; chroma for left siting from horizontal
   [1 2 1] taps times a 2-row sum, `>> 18` with `(128 << 18) + (1 << 17)`;
