@@ -50,11 +50,22 @@
 //
 // RGB to YUV, Q15 coefficients k = rgb_to_yuv_coeffs(matrix, range):
 //   Y = clamp8((k.yr * R + k.yg * G + k.yb * B + (k.y_offset << 15) + 16384) >> 15)
-//   Chroma sample (cx, cy) uses the 2x2 sums SR, SG, SB of pixels
-//   (2cx + i, 2cy + j), i, j in {0, 1}; coordinates past the right or bottom
-//   edge are clamped to the last column or row (odd sizes replicate):
+//   Chroma sample (cx, cy) uses the sums SR, SG, SB below; coordinates past
+//   the edges are clamped to the first or last column or row (odd sizes
+//   replicate). chroma_loc = center sums the 2x2 box of pixels
+//   (2cx + i, 2cy + j), i, j in {0, 1}, and shifts by 17:
 //   U = clamp8((k.ur * SR + k.ug * SG + k.ub * SB + (128 << 17) + 65536) >> 17)
 //   V = clamp8((k.vr * SR + k.vg * SG + k.vb * SB + (128 << 17) + 65536) >> 17)
+//   chroma_loc = left filters horizontally with [1 2 1] taps centered on the
+//   even luma column x0 = 2cx and averages the two rows, so each sum
+//   carries weight 8 and the shift is 18:
+//     SR = sum over j in {0, 1} of
+//          R[xm, 2cy + j] + 2 * R[x0, 2cy + j] + R[xp, 2cy + j]
+//     xm = max(x0 - 1, 0), xp = min(x0 + 1, w - 1); SG, SB likewise
+//     U  = clamp8((k.ur * SR + k.ug * SG + k.ub * SB + (128 << 18) + (1 << 17)) >> 18)
+//     V  = clamp8((k.vr * SR + k.vg * SG + k.vb * SB + (128 << 18) + (1 << 17)) >> 18)
+//   SR, SG, SB never exceed 2040. This is the decoder's inverse siting for
+//   the left upsample above.
 //   Coefficients were rounded once, then yg, ug, vg were adjusted so that
 //   yr + yg + yb == round(32768 * (limited ? 219/255 : 1)) and the U and V
 //   rows sum to 0: gray input gives exactly U = V = 128, white gives 235/255.

@@ -335,20 +335,30 @@ int ref_luma(const Rgb& p, const RgbToYuvCoeffs& k) {
   return clamp8((k.yr * p.r + k.yg * p.g + k.yb * p.b + (k.y_offset << 15) + 16384) >> 15);
 }
 
-// Chroma (c = 0 for U, 1 for V) of sample (cx, cy) from 2x2 sums with edge replication.
-int ref_chroma(const Frame& rgb, int c, int cx, int cy, const RgbToYuvCoeffs& k) {
+// Chroma (c = 0 for U, 1 for V) of sample (cx, cy), straight from convert.hpp.
+int ref_chroma(const Frame& rgb, int c, int cx, int cy, const RgbToYuvCoeffs& k,
+               ChromaLocation loc) {
+  const int w = rgb.width(), x0 = 2 * cx;
   int sr = 0, sg = 0, sb = 0;
+  const auto add = [&](int x, int y, int weight) {
+    const Rgb p = pixel(rgb, std::min(std::max(x, 0), w - 1), std::min(y, rgb.height() - 1));
+    sr += weight * p.r;
+    sg += weight * p.g;
+    sb += weight * p.b;
+  };
   for (int j = 0; j < 2; ++j) {
-    for (int i = 0; i < 2; ++i) {
-      const Rgb p = pixel(rgb, std::min(2 * cx + i, rgb.width() - 1),
-                          std::min(2 * cy + j, rgb.height() - 1));
-      sr += p.r;
-      sg += p.g;
-      sb += p.b;
+    if (loc == ChromaLocation::center) {
+      add(x0, 2 * cy + j, 1);
+      add(x0 + 1, 2 * cy + j, 1);
+    } else {
+      add(x0 - 1, 2 * cy + j, 1);
+      add(x0, 2 * cy + j, 2);
+      add(x0 + 1, 2 * cy + j, 1);
     }
   }
+  const int shift = loc == ChromaLocation::center ? 17 : 18;
   const int v = c == 0 ? k.ur * sr + k.ug * sg + k.ub * sb : k.vr * sr + k.vg * sg + k.vb * sb;
-  return clamp8((v + (128 << 17) + 65536) >> 17);
+  return clamp8((v + (128 << shift) + (1 << (shift - 1))) >> shift);
 }
 
 }  // namespace
@@ -414,25 +424,27 @@ TEST(rgb_to_yuv_matches_reference_model) {
   std::uint64_t seed = 400;
   for (const PixelFormat src : kRgbSources) {
     for (const PixelFormat dst : kYuvTargets) {
-      for (const auto& [w, h] : test::test_sizes()) {
-        const Frame in = test::random_frame(src, w, h, ++seed);
-        const ConvertOptions o{ColorMatrix::bt709, ColorRange::limited};
-        const RgbToYuvCoeffs k = rgb_to_yuv_coeffs(o.matrix, o.range);
-        Frame out = test::random_frame(dst, w, h, ++seed);
-        REQUIRE_OK(convert(in, out, o));
-        int bad = 0;
-        for (int y = 0; y < h; ++y) {
-          for (int x = 0; x < w; ++x) bad += y_at(out, x, y) != ref_luma(pixel(in, x, y), k);
-        }
-        for (int cy = 0; cy < (h + 1) / 2; ++cy) {
-          for (int cx = 0; cx < (w + 1) / 2; ++cx) {
-            bad += chroma_at(out, 0, cx, cy) != ref_chroma(in, 0, cx, cy, k);
-            bad += chroma_at(out, 1, cx, cy) != ref_chroma(in, 1, cx, cy, k);
+      for (const ChromaLocation loc : kLocations) {
+        for (const auto& [w, h] : test::test_sizes()) {
+          const Frame in = test::random_frame(src, w, h, ++seed);
+          const ConvertOptions o{ColorMatrix::bt709, ColorRange::limited, ChromaMode::bilinear, loc};
+          const RgbToYuvCoeffs k = rgb_to_yuv_coeffs(o.matrix, o.range);
+          Frame out = test::random_frame(dst, w, h, ++seed);
+          REQUIRE_OK(convert(in, out, o));
+          int bad = 0;
+          for (int y = 0; y < h; ++y) {
+            for (int x = 0; x < w; ++x) bad += y_at(out, x, y) != ref_luma(pixel(in, x, y), k);
           }
+          for (int cy = 0; cy < (h + 1) / 2; ++cy) {
+            for (int cx = 0; cx < (w + 1) / 2; ++cx) {
+              bad += chroma_at(out, 0, cx, cy) != ref_chroma(in, 0, cx, cy, k, loc);
+              bad += chroma_at(out, 1, cx, cy) != ref_chroma(in, 1, cx, cy, k, loc);
+            }
+          }
+          CHECK_MSG(bad == 0, std::string(pixfmt_name(src)) + " -> " +
+                                  std::string(pixfmt_name(dst)) + " " + std::to_string(w) + "x" +
+                                  std::to_string(h) + ": " + std::to_string(bad) + " bad samples");
         }
-        CHECK_MSG(bad == 0, std::string(pixfmt_name(src)) + " -> " +
-                                std::string(pixfmt_name(dst)) + " " + std::to_string(w) + "x" +
-                                std::to_string(h) + ": " + std::to_string(bad) + " bad samples");
       }
     }
   }
@@ -466,8 +478,11 @@ TEST(round_trip_error_bounds) {
           Frame yuv, back;
           REQUIRE_OK(Frame::allocate(mid, img.width(), img.height(), yuv));
           REQUIRE_OK(Frame::allocate(PixelFormat::rgb24, img.width(), img.height(), back));
-          REQUIRE_OK(convert(img, yuv, {m, r, mode}));
-          REQUIRE_OK(convert(yuv, back, {m, r, mode}));
+          // Nearest decoding pairs with the box encoder; bilinear with the left filter.
+          const ChromaLocation loc =
+              mode == ChromaMode::nearest ? ChromaLocation::center : ChromaLocation::left;
+          REQUIRE_OK(convert(img, yuv, {m, r, mode, loc}));
+          REQUIRE_OK(convert(yuv, back, {m, r, mode, loc}));
           int worst = 0;
           for (int y = 0; y < img.height(); ++y) {
             for (int x = 0; x < img.width(); ++x) {
@@ -548,7 +563,8 @@ TEST(every_pair_row_ranges_and_isas_match) {
       const auto sf = static_cast<PixelFormat>(s), df = static_cast<PixelFormat>(d);
       for (const auto& [w, h] : test::test_sizes()) {
         const Frame in = test::random_frame(sf, w, h, 900 + s * 7 + d + w);
-        const ConvertOptions o{ColorMatrix::bt601, ColorRange::limited};
+        const ChromaLocation loc = (w + s) % 2 ? ChromaLocation::left : ChromaLocation::center;
+        const ConvertOptions o{ColorMatrix::bt601, ColorRange::limited, ChromaMode::bilinear, loc};
         CHECK_ALL_ISAS_MATCH([&] { return test::random_frame(df, w, h, 3); },
                              [&](Frame& out) { return convert(in, out, o); });
         if (h < 4) continue;

@@ -101,23 +101,40 @@ inline int luma(const std::uint8_t* p, const RgbToYuvCoeffs& k) {
                 15);
 }
 
-// Chroma sample cx from the 2x2 sums (convert.hpp); the right column is
-// clamped for odd widths. s0, s1 are the two source rows, either may repeat.
+// Chroma sample cx from the box (center) or [1 2 1] (left) sums in
+// convert.hpp; edge columns are clamped. s0, s1 are the two source rows,
+// either may repeat.
 template <int P>
 inline void chroma_at(const std::uint8_t* s0, const std::uint8_t* s1, int cx, int width,
-                      const RgbToYuvCoeffs& k, int& u, int& v) {
+                      const RgbToYuvCoeffs& k, ChromaLocation loc, int& u, int& v) {
   using L = Layout<P>;
   const int x0 = cx * 2, x1 = std::min(x0 + 1, width - 1);
-  const std::uint8_t* const q[4] = {s0 + x0 * L::bpp, s0 + x1 * L::bpp, s1 + x0 * L::bpp,
-                                    s1 + x1 * L::bpp};
   int sr = 0, sg = 0, sb = 0;
-  for (const std::uint8_t* p : q) {
-    sr += p[L::r];
-    sg += p[L::g];
-    sb += p[L::b];
+  int shift = 17;
+  if (loc == ChromaLocation::center) {
+    const std::uint8_t* const q[4] = {s0 + x0 * L::bpp, s0 + x1 * L::bpp, s1 + x0 * L::bpp,
+                                      s1 + x1 * L::bpp};
+    for (const std::uint8_t* p : q) {
+      sr += p[L::r];
+      sg += p[L::g];
+      sb += p[L::b];
+    }
+  } else {
+    shift = 18;
+    const int xm = std::max(x0 - 1, 0);
+    for (const std::uint8_t* s : {s0, s1}) {
+      const std::uint8_t* const q[3] = {s + xm * L::bpp, s + x0 * L::bpp, s + x1 * L::bpp};
+      const int w[3] = {1, 2, 1};
+      for (int t = 0; t < 3; ++t) {
+        sr += w[t] * q[t][L::r];
+        sg += w[t] * q[t][L::g];
+        sb += w[t] * q[t][L::b];
+      }
+    }
   }
-  u = clamp8((k.ur * sr + k.ug * sg + k.ub * sb + (128 << 17) + 65536) >> 17);
-  v = clamp8((k.vr * sr + k.vg * sg + k.vb * sb + (128 << 17) + 65536) >> 17);
+  const int bias = (128 << shift) + (1 << (shift - 1));
+  u = clamp8((k.ur * sr + k.ug * sg + k.ub * sb + bias) >> shift);
+  v = clamp8((k.vr * sr + k.vg * sg + k.vb * sb + bias) >> shift);
 }
 
 template <int P>
@@ -132,11 +149,11 @@ void luma_rows(const std::uint8_t* s0, const std::uint8_t* s1, std::uint8_t* y0,
 template <int P>
 void packed_to_yuv420_row(const std::uint8_t* s0, const std::uint8_t* s1, std::uint8_t* y0,
                           std::uint8_t* y1, std::uint8_t* u, std::uint8_t* v, int width,
-                          const RgbToYuvCoeffs& k, ChromaLocation) {
+                          const RgbToYuvCoeffs& k, ChromaLocation loc) {
   luma_rows<P>(s0, s1, y0, y1, width, k);
   for (int cx = 0; cx < (width + 1) / 2; ++cx) {
     int cu, cv;
-    chroma_at<P>(s0, s1, cx, width, k, cu, cv);
+    chroma_at<P>(s0, s1, cx, width, k, loc, cu, cv);
     u[cx] = static_cast<std::uint8_t>(cu);
     v[cx] = static_cast<std::uint8_t>(cv);
   }
@@ -145,11 +162,11 @@ void packed_to_yuv420_row(const std::uint8_t* s0, const std::uint8_t* s1, std::u
 template <int P>
 void packed_to_nv12_row(const std::uint8_t* s0, const std::uint8_t* s1, std::uint8_t* y0,
                         std::uint8_t* y1, std::uint8_t* uv, int width, const RgbToYuvCoeffs& k,
-                        ChromaLocation) {
+                        ChromaLocation loc) {
   luma_rows<P>(s0, s1, y0, y1, width, k);
   for (int cx = 0; cx < (width + 1) / 2; ++cx) {
     int cu, cv;
-    chroma_at<P>(s0, s1, cx, width, k, cu, cv);
+    chroma_at<P>(s0, s1, cx, width, k, loc, cu, cv);
     uv[cx * 2] = static_cast<std::uint8_t>(cu);
     uv[cx * 2 + 1] = static_cast<std::uint8_t>(cv);
   }

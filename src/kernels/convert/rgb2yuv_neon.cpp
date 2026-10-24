@@ -44,11 +44,12 @@ inline uint8x16_t luma16(const Planar16& p, const Coef& c) {
                          luma8(widen_hi(p.r), widen_hi(p.g), widen_hi(p.b), c));
 }
 
-// One chroma component for 8 samples from the 2x2 sums. Lanes of kc start at
-// Lane0 (0 for U, 3 for V). (k.r*SR + k.g*SG + k.b*SB + (128 << 17) + 65536) >> 17.
-template <int Lane0>
+// One chroma component for 8 samples from the sums. Lanes of kc start at
+// Lane0 (0 for U, 3 for V). (k.r*SR + k.g*SG + k.b*SB + (128 << Shift) +
+// (1 << (Shift - 1))) >> Shift.
+template <int Lane0, int Shift>
 inline uint8x8_t chroma8(int16x8_t sr, int16x8_t sg, int16x8_t sb, const int16x8_t kc) {
-  const int32x4_t bias = vdupq_n_s32(128 << 17);
+  const int32x4_t bias = vdupq_n_s32(128 << Shift);
   int32x4_t lo = vmlal_laneq_s16(bias, vget_low_s16(sr), kc, Lane0);
   int32x4_t hi = vmlal_high_laneq_s16(bias, sr, kc, Lane0);
   lo = vmlal_laneq_s16(lo, vget_low_s16(sg), kc, Lane0 + 1);
@@ -56,8 +57,8 @@ inline uint8x8_t chroma8(int16x8_t sr, int16x8_t sg, int16x8_t sb, const int16x8
   lo = vmlal_laneq_s16(lo, vget_low_s16(sb), kc, Lane0 + 2);
   hi = vmlal_high_laneq_s16(hi, sb, kc, Lane0 + 2);
   // vqrshrun_n_s32 only shifts by up to 16, so round with vrshr first.
-  return vqmovn_u16(vcombine_u16(vqmovun_s32(vrshrq_n_s32(lo, 17)),
-                                 vqmovun_s32(vrshrq_n_s32(hi, 17))));
+  return vqmovn_u16(vcombine_u16(vqmovun_s32(vrshrq_n_s32(lo, Shift)),
+                                 vqmovun_s32(vrshrq_n_s32(hi, Shift))));
 }
 
 // Sum of each horizontal pixel pair over both rows, as s16.
@@ -65,14 +66,45 @@ inline int16x8_t sum2x2(uint8x16_t a, uint8x16_t b) {
   return vreinterpretq_s16_u16(vpadalq_u8(vpaddlq_u8(a), b));
 }
 
-template <int P, bool Nv12>
+// Previous block's channel vectors (two rows), for the [1 2 1] left filter.
+struct Prev {
+  uint8x16_t r0, g0, b0, r1, g1, b1;
+};
+
+// [1 2 1] taps over both rows, centered on the even columns, as the pair sums
+// (x[2i-1] + x[2i]) + (x[2i] + x[2i+1]). pa, pb (the previous block) supply
+// x[-1] across blocks; for the first block they repeat x[0] (edge clamp).
+inline int16x8_t sum121(uint8x16_t a, uint8x16_t b, uint8x16_t pa, uint8x16_t pb) {
+  uint16x8_t acc = vpadalq_u8(vpaddlq_u8(a), b);
+  acc = vpadalq_u8(acc, vextq_u8(pa, a, 15));
+  acc = vpadalq_u8(acc, vextq_u8(pb, b, 15));
+  return vreinterpretq_s16_u16(acc);
+}
+
+template <int P, bool Nv12, bool Left>
 inline void block(const std::uint8_t* s0, const std::uint8_t* s1, std::uint8_t* y0,
-                  std::uint8_t* y1, std::uint8_t* u, std::uint8_t* v, const Coef& c) {
+                  std::uint8_t* y1, std::uint8_t* u, std::uint8_t* v, const Coef& c, Prev& prev,
+                  bool first) {
   const Planar16 a = load16<P>(s0), b = load16<P>(s1);
   vst1q_u8(y0, luma16(a, c));
   vst1q_u8(y1, luma16(b, c));
-  const int16x8_t sr = sum2x2(a.r, b.r), sg = sum2x2(a.g, b.g), sb = sum2x2(a.b, b.b);
-  const uint8x8_t cu = chroma8<0>(sr, sg, sb, c.kc), cv = chroma8<3>(sr, sg, sb, c.kc);
+  uint8x8_t cu, cv;
+  if constexpr (Left) {
+    if (first) {
+      prev = {vdupq_laneq_u8(a.r, 0), vdupq_laneq_u8(a.g, 0), vdupq_laneq_u8(a.b, 0),
+              vdupq_laneq_u8(b.r, 0), vdupq_laneq_u8(b.g, 0), vdupq_laneq_u8(b.b, 0)};
+    }
+    const int16x8_t sr = sum121(a.r, b.r, prev.r0, prev.r1);
+    const int16x8_t sg = sum121(a.g, b.g, prev.g0, prev.g1);
+    const int16x8_t sb = sum121(a.b, b.b, prev.b0, prev.b1);
+    prev = {a.r, a.g, a.b, b.r, b.g, b.b};
+    cu = chroma8<0, 18>(sr, sg, sb, c.kc);
+    cv = chroma8<3, 18>(sr, sg, sb, c.kc);
+  } else {
+    const int16x8_t sr = sum2x2(a.r, b.r), sg = sum2x2(a.g, b.g), sb = sum2x2(a.b, b.b);
+    cu = chroma8<0, 17>(sr, sg, sb, c.kc);
+    cv = chroma8<3, 17>(sr, sg, sb, c.kc);
+  }
   if constexpr (Nv12) {
     uint8x8x2_t uv;
     uv.val[0] = cu;
@@ -87,18 +119,19 @@ inline void block(const std::uint8_t* s0, const std::uint8_t* s1, std::uint8_t* 
 // Shared row driver. For odd widths the last chroma sample pairs the last
 // pixel with itself, so the final block runs on a copy whose tail repeats the
 // last pixel instead of reading padding.
-template <int P, bool Nv12>
+template <int P, bool Nv12, bool Left>
 void packed_to_yuv_row(const std::uint8_t* s0, const std::uint8_t* s1, std::uint8_t* y0,
                        std::uint8_t* y1, std::uint8_t* u, std::uint8_t* v, int width,
                        const RgbToYuvCoeffs& k) {
   constexpr int bpp = Layout<P>::bpp;
   const Coef c = make_coef(k);
   const int step = Nv12 ? 2 : 1;  // chroma bytes per sample in u
+  Prev prev{};
   int x = 0;
   const int body = (width & 1) ? width - 16 : width;
   for (; x < body; x += 16) {
-    block<P, Nv12>(s0 + x * bpp, s1 + x * bpp, y0 + x, y1 + x, u + (x / 2) * step,
-                   v + (x / 2) * step, c);
+    block<P, Nv12, Left>(s0 + x * bpp, s1 + x * bpp, y0 + x, y1 + x, u + (x / 2) * step,
+                         v + (x / 2) * step, c, prev, x == 0);
   }
   if (x < width) {
     alignas(16) std::uint8_t t0[16 * bpp], t1[16 * bpp];
@@ -109,22 +142,31 @@ void packed_to_yuv_row(const std::uint8_t* s0, const std::uint8_t* s1, std::uint
       std::memcpy(t0 + i * bpp, t0 + (rem - 1) * bpp, bpp);
       std::memcpy(t1 + i * bpp, t1 + (rem - 1) * bpp, bpp);
     }
-    block<P, Nv12>(t0, t1, y0 + x, y1 + x, u + (x / 2) * step, v + (x / 2) * step, c);
+    block<P, Nv12, Left>(t0, t1, y0 + x, y1 + x, u + (x / 2) * step, v + (x / 2) * step, c, prev,
+                         x == 0);
   }
 }
 
 template <int P>
 void packed_to_yuv420_row(const std::uint8_t* s0, const std::uint8_t* s1, std::uint8_t* y0,
                           std::uint8_t* y1, std::uint8_t* u, std::uint8_t* v, int width,
-                          const RgbToYuvCoeffs& k, ChromaLocation) {
-  packed_to_yuv_row<P, false>(s0, s1, y0, y1, u, v, width, k);
+                          const RgbToYuvCoeffs& k, ChromaLocation loc) {
+  if (loc == ChromaLocation::center) {
+    packed_to_yuv_row<P, false, false>(s0, s1, y0, y1, u, v, width, k);
+  } else {
+    packed_to_yuv_row<P, false, true>(s0, s1, y0, y1, u, v, width, k);
+  }
 }
 
 template <int P>
 void packed_to_nv12_row(const std::uint8_t* s0, const std::uint8_t* s1, std::uint8_t* y0,
                         std::uint8_t* y1, std::uint8_t* uv, int width, const RgbToYuvCoeffs& k,
-                        ChromaLocation) {
-  packed_to_yuv_row<P, true>(s0, s1, y0, y1, uv, uv, width, k);
+                        ChromaLocation loc) {
+  if (loc == ChromaLocation::center) {
+    packed_to_yuv_row<P, true, false>(s0, s1, y0, y1, uv, uv, width, k);
+  } else {
+    packed_to_yuv_row<P, true, true>(s0, s1, y0, y1, uv, uv, width, k);
+  }
 }
 
 template <int P>
