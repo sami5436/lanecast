@@ -170,6 +170,7 @@ Status build_format(const FilterSpec& f, const VideoInfo& cur, std::unique_ptr<S
   auto st = std::make_unique<ConvertStage>();
   st->opts.matrix = cur.matrix;
   st->opts.range = cur.range;
+  st->opts.chroma_loc = cur.chroma_loc;
   if (const std::string* v = find_arg(f, "matrix")) {
     const auto m = parse_color_matrix(*v);
     if (!m) return fail(error, "format: unknown matrix '" + *v + "' (use bt601 or bt709)");
@@ -189,6 +190,15 @@ Status build_format(const FilterSpec& f, const VideoInfo& cur, std::unique_ptr<S
       return fail(error, "format: unknown chroma '" + *v + "' (use nearest or bilinear)");
     }
   }
+  if (const std::string* v = find_arg(f, "chroma_loc")) {
+    if (*v == "left") {
+      st->opts.chroma_loc = ChromaLocation::left;
+    } else if (*v == "center") {
+      st->opts.chroma_loc = ChromaLocation::center;
+    } else {
+      return fail(error, "format: unknown chroma_loc '" + *v + "' (use left or center)");
+    }
+  }
   if (!convert_supported(cur.format, *target)) {
     return fail(error, "format: cannot convert " + std::string(pixfmt_name(cur.format)) +
                            " to " + std::string(pixfmt_name(*target)));
@@ -198,6 +208,7 @@ Status build_format(const FilterSpec& f, const VideoInfo& cur, std::unique_ptr<S
   if (!pixfmt_info(cur.format).is_yuv && pixfmt_info(*target).is_yuv) {
     st->output.matrix = st->opts.matrix;
     st->output.range = st->opts.range;
+    st->output.chroma_loc = st->opts.chroma_loc;
   }
   stage = std::move(st);
   return Status::ok;

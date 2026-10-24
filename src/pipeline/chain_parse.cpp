@@ -22,7 +22,7 @@ struct FilterSchema {
 const std::vector<FilterSchema>& schemas() {
   static const std::vector<FilterSchema> s = {
       {"scale", {"w", "h"}, {"w", "h", "flags"}, {"w", "h"}},
-      {"format", {"pix_fmt"}, {"pix_fmt", "matrix", "range", "chroma"}, {"pix_fmt"}},
+      {"format", {"pix_fmt"}, {"pix_fmt", "matrix", "range", "chroma", "chroma_loc"}, {"pix_fmt"}},
       {"blur", {"size"}, {"size"}, {"size"}},
       {"eq", {}, {"brightness", "contrast"}, {}},
   };
