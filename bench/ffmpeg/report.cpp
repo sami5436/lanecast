@@ -15,6 +15,16 @@ std::string db(double v) {
   return buf;
 }
 
+// Pipes in swscale flag lists would end the table cell.
+std::string cell(const std::string& s) {
+  std::string out;
+  for (const char c : s) {
+    if (c == '|') out += '\\';
+    out += c;
+  }
+  return out;
+}
+
 std::string json_db(double v) { return std::isinf(v) ? "null" : db(v); }
 
 std::string escaped(const std::string& s) {
@@ -36,7 +46,7 @@ void write_table(const std::vector<Row>& rows, const std::vector<std::string>& n
     std::printf("| %s | %s | %dx%d | %d/%d | %.0f | %.0f | %.2fx | %s | %s | %s | %s |\n",
                 r.op.c_str(), r.pattern.c_str(), r.width, r.height, r.lc_threads, r.sws_threads,
                 r.lc_ns, r.sws_ns, r.sws_ns / r.lc_ns, db(r.psnr_lc_ref).c_str(),
-                db(r.psnr_sws_ref).c_str(), db(r.psnr_lc_sws).c_str(), r.sws.c_str());
+                db(r.psnr_sws_ref).c_str(), db(r.psnr_lc_sws).c_str(), cell(r.sws).c_str());
   }
   for (const std::string& n : notes) std::printf("\n%s\n", n.c_str());
 }
