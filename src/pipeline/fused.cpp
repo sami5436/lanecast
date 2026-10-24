@@ -30,23 +30,28 @@ struct PlaneJob {
   kernels::scale::FilterView hview{};
   std::size_t mid_stride = 0;  // int16 elements per intermediate row, incl. slack
   std::size_t out_stride = 0;  // bytes per strip row, incl. slack
+  bool q7 = false;             // strip rows are int16 with 7 fraction bits, not bytes
 };
 
+// full_chroma: every plane is scaled to the destination luma size (chroma with
+// the source sample sited per `loc` and the destination samples centered like
+// luma) and kept in Q7 for the 4:4:4 convert.
 Status build_job(PixelFormat format, int plane, int src_w, int src_h, int dst_w, int dst_h,
-                 ScaleFilter filter, ChromaLocation loc, PlaneJob& j) {
+                 ScaleFilter filter, ChromaLocation loc, bool full_chroma, PlaneJob& j) {
   const auto pi = static_cast<std::size_t>(plane);
   j.channels = pixfmt_info(format).bytes_per_pixel[pi];
-  j.dst_w = plane_width(format, plane, dst_w);
+  j.q7 = full_chroma;
+  j.dst_w = full_chroma ? dst_w : plane_width(format, plane, dst_w);
+  const int plane_h = full_chroma ? dst_h : plane_height(format, plane, dst_h);
   const int shift_x = pixfmt_info(format).shift_x[pi];
   const int pos_x =
       shift_x == 0 ? kCenterPos : ((loc == ChromaLocation::left ? 0 : kCenterPos) + 128) >> shift_x;
   if (Status s = build_scale_filter(filter, plane_width(format, plane, src_w), j.dst_w, j.hx,
-                                    pos_x, pos_x);
+                                    pos_x, full_chroma ? kCenterPos : pos_x);
       s != Status::ok) {
     return s;
   }
-  if (Status s = build_scale_filter(filter, plane_height(format, plane, src_h),
-                                    plane_height(format, plane, dst_h), j.hy);
+  if (Status s = build_scale_filter(filter, plane_height(format, plane, src_h), plane_h, j.hy);
       s != Status::ok) {
     return s;
   }
@@ -61,7 +66,7 @@ Status build_job(PixelFormat format, int plane, int src_w, int src_h, int dst_w,
   j.hview = {taps, stride, j.hx.start.data(), j.hx_weights.data()};
   const auto row_bytes = static_cast<std::size_t>(j.dst_w) * j.channels;
   j.mid_stride = align64(row_bytes * 2 + 64) / 2;
-  j.out_stride = align64(row_bytes + kRowPadding);
+  j.out_stride = align64((j.q7 ? row_bytes * 2 : row_bytes) + kRowPadding);
   return Status::ok;
 }
 
@@ -80,8 +85,8 @@ int packed_index(PixelFormat f) noexcept {
   }
 }
 
-// Scales destination rows [o0, o1) of one plane into `out`, rows out_stride
-// apart, with the Scaler's ring of horizontally scaled rows in `scratch`.
+// Scales destination rows [o0, o1) of one plane into `out` (bytes, or int16
+// Q7 samples when j.q7), rows out_stride apart, with the Scaler's ring of horizontally scaled rows in `scratch`.
 void scale_rows(const PlaneJob& j, const kernels::scale::Table& t, const Plane& sp, int o0,
                 int o1, std::uint8_t* out, std::uint8_t* scratch) {
   const int taps = j.hy.taps;
@@ -101,8 +106,13 @@ void scale_rows(const PlaneJob& j, const kernels::scale::Table& t, const Plane& 
     for (int k = 0; k < taps; ++k) {
       ptrs[k] = ring + static_cast<std::size_t>((s0 + k) % taps) * j.mid_stride;
     }
-    t.vscale(ptrs, j.hy.weights.data() + static_cast<std::size_t>(o) * taps, taps,
-             out + static_cast<std::size_t>(o - o0) * j.out_stride, count);
+    const std::int16_t* w = j.hy.weights.data() + static_cast<std::size_t>(o) * taps;
+    std::uint8_t* dst = out + static_cast<std::size_t>(o - o0) * j.out_stride;
+    if (j.q7) {
+      t.vscale_q7(ptrs, w, taps, reinterpret_cast<std::int16_t*>(dst), count);
+    } else {
+      t.vscale(ptrs, w, taps, dst, count);
+    }
   }
 }
 
@@ -112,10 +122,12 @@ struct ScaleConvert::Impl {
   PixelFormat src_format;
   int src_w, src_h, dst_w, dst_h;
   ConvertOptions opts;
+  bool full_chroma = false;     // FusedChroma::full
   int packed = 0;
   PlaneJob luma, chroma;
   std::size_t ring_bytes = 0;   // scale intermediate rows (scratch slot 0)
   std::size_t chroma_rows = 0;  // chroma rows a strip holds
+  std::size_t split_stride = 0;  // bytes per Q7 row of nv12 U or V split from UV (full chroma)
 };
 
 ScaleConvert::ScaleConvert(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
@@ -124,7 +136,7 @@ ScaleConvert::~ScaleConvert() = default;
 Status ScaleConvert::create(PixelFormat src_format, int src_width, int src_height,
                             PixelFormat dst_format, int dst_width, int dst_height,
                             ScaleFilter filter, const ConvertOptions& opts,
-                            std::unique_ptr<ScaleConvert>& out) {
+                            std::unique_ptr<ScaleConvert>& out, FusedChroma chroma) {
   const int packed = packed_index(dst_format);
   if ((src_format != PixelFormat::yuv420p && src_format != PixelFormat::nv12) || packed < 0) {
     return Status::unsupported_format;
@@ -139,11 +151,12 @@ Status ScaleConvert::create(PixelFormat src_format, int src_width, int src_heigh
   impl->dst_w = dst_width;
   impl->dst_h = dst_height;
   impl->opts = opts;
+  impl->full_chroma = chroma == FusedChroma::full;
   impl->packed = packed;
   for (int p = 0; p < 2; ++p) {
     PlaneJob& j = p == 0 ? impl->luma : impl->chroma;
     if (Status s = build_job(src_format, p, src_width, src_height, dst_width, dst_height, filter,
-                             opts.chroma_loc, j);
+                             opts.chroma_loc, impl->full_chroma, j);
         s != Status::ok) {
       return s;
     }
@@ -151,7 +164,8 @@ Status ScaleConvert::create(PixelFormat src_format, int src_width, int src_heigh
     impl->ring_bytes =
         std::max(impl->ring_bytes, align64(taps * sizeof(void*)) + taps * j.mid_stride * 2);
   }
-  impl->chroma_rows = kStripRows / 2 + 2;
+  impl->chroma_rows = impl->full_chroma ? kStripRows : kStripRows / 2 + 2;
+  impl->split_stride = align64(static_cast<std::size_t>(dst_width) * 2 + kRowPadding);
   out.reset(new ScaleConvert(std::move(impl)));
   return Status::ok;
 }
@@ -171,25 +185,29 @@ Status ScaleConvert::run(const Frame& src, Frame& dst, RowRange rows) const {
   }
 
   const bool nv12 = m.src_format == PixelFormat::nv12;
-  const bool bilinear = m.opts.chroma == ChromaMode::bilinear;
+  const bool full = m.full_chroma;
+  const bool bilinear = !full && m.opts.chroma == ChromaMode::bilinear;
   const auto& st = kernels::scale::active_table();
   const auto& ct = kernels::convert::active_table();
   const YuvToRgbCoeffs c = yuv_to_rgb_coeffs(m.opts.matrix, m.opts.range);
   const int ch = plane_height(m.src_format, 1, m.dst_h);
   const std::size_t luma_bytes = static_cast<std::size_t>(kStripRows) * m.luma.out_stride;
   const std::size_t plane_bytes = m.chroma_rows * m.chroma.out_stride;
+  // Full chroma on nv12 also needs one U and one V row split out of the UV strip.
+  const std::size_t split_bytes = full && nv12 ? 2 * m.split_stride : 0;
   std::uint8_t* ring = detail::thread_scratch(0, m.ring_bytes);
   std::uint8_t* ybuf = detail::thread_scratch(1, luma_bytes);
-  std::uint8_t* ubuf = detail::thread_scratch(2, nv12 ? plane_bytes : 2 * plane_bytes);
+  std::uint8_t* ubuf = detail::thread_scratch(2, (nv12 ? plane_bytes : 2 * plane_bytes) + split_bytes);
   if (ring == nullptr || ybuf == nullptr || ubuf == nullptr) return Status::out_of_memory;
-  std::uint8_t* vbuf = ubuf + plane_bytes;
+  std::uint8_t* vbuf = ubuf + plane_bytes;  // full chroma on nv12: the split rows instead
 
   const Plane dp = dst.plane(0);
   for (int a = rows.begin; a < end; a += kStripRows) {
     const int b = std::min(a + kStripRows, end);
     // Chroma rows this strip's luma rows read (one more each side for bilinear).
-    const int c0 = std::max((a >> 1) - (bilinear ? 1 : 0), 0);
-    const int c1 = std::min(((b + 1) >> 1) + (bilinear ? 1 : 0), ch);
+    // Full chroma has one chroma row per luma row.
+    const int c0 = full ? a : std::max((a >> 1) - (bilinear ? 1 : 0), 0);
+    const int c1 = full ? b : std::min(((b + 1) >> 1) + (bilinear ? 1 : 0), ch);
     scale_rows(m.luma, st, src.plane(0), a, b, ybuf, ring);
     scale_rows(m.chroma, st, src.plane(1), c0, c1, ubuf, ring);
     if (!nv12) scale_rows(m.chroma, st, src.plane(2), c0, c1, vbuf, ring);
@@ -201,7 +219,23 @@ Status ScaleConvert::run(const Frame& src, Frame& dst, RowRange rows) const {
       const int cyn = std::clamp(cy + ((y & 1) ? 1 : -1), 0, ch - 1);
       const std::uint8_t* yr = ybuf + static_cast<std::size_t>(y - a) * m.luma.out_stride;
       std::uint8_t* out = dp.row(y);
-      if (nv12 && bilinear) {
+      if (full) {
+        const auto fn = ct.yuv444_q7_to_packed[m.packed];
+        if (fn == nullptr) return Status::not_implemented;
+        const auto* yq = reinterpret_cast<const std::int16_t*>(yr);
+        const auto* uq = reinterpret_cast<const std::int16_t*>(crow(ubuf, y));
+        if (nv12) {
+          auto* split_u = reinterpret_cast<std::int16_t*>(vbuf);
+          auto* split_v = reinterpret_cast<std::int16_t*>(vbuf + m.split_stride);
+          for (int x = 0; x < m.dst_w; ++x) {
+            split_u[x] = uq[2 * x];
+            split_v[x] = uq[2 * x + 1];
+          }
+          fn(yq, split_u, split_v, out, m.dst_w, c);
+        } else {
+          fn(yq, uq, reinterpret_cast<const std::int16_t*>(crow(vbuf, y)), out, m.dst_w, c);
+        }
+      } else if (nv12 && bilinear) {
         const auto fn = ct.nv12_bilinear_to_packed[m.packed];
         if (fn == nullptr) return Status::not_implemented;
         fn(yr, crow(ubuf, cy), crow(ubuf, cyn), out, m.dst_w, c, m.opts.chroma_loc);

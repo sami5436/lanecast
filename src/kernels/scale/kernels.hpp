@@ -45,15 +45,30 @@ using HScaleRowFn = void (*)(const std::uint8_t* src, std::int16_t* mid, int dst
 using VScaleRowFn = void (*)(const std::int16_t* const* rows, const std::int16_t* w, int taps,
                              std::uint8_t* dst, int count);
 
+// Vertical pass that keeps the 7 fraction bits of mid (for the 4:4:4 convert):
+//   dst[i] = (sum_k w[k] * rows[k][i] + (1 << 13)) >> 14
+// for i in [0, count). The weights are non-negative and sum to 16384, so the
+// result lies in [0, 32640] without clamping. May write up to 64 bytes past
+// count samples.
+using VScaleQ7RowFn = void (*)(const std::int16_t* const* rows, const std::int16_t* w, int taps,
+                               std::int16_t* dst, int count);
+
 struct Table {
   HScaleRowFn hscale[5] = {};  // index by channel count 1..4; [0] unused
   VScaleRowFn vscale = nullptr;
+  VScaleQ7RowFn vscale_q7 = nullptr;
 };
 
 void fill_scalar(Table& t);
 void fill_neon(Table& t);
 void fill_sse41(Table& t);
 void fill_avx2(Table& t);
+// vscale_q7 of each tier, one TU per tier (called by fill_scalar / fill_neon /
+// fill_sse41 / fill_avx2).
+void fill_scalar_q7(Table& t);
+void fill_neon_q7(Table& t);
+void fill_sse41_q7(Table& t);
+void fill_avx2_q7(Table& t);
 
 const Table& table(Isa isa);
 const Table& active_table();

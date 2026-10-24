@@ -200,6 +200,7 @@ std::unique_ptr<Pipeline> make_pipeline(const std::string& chain, const VideoInf
   PipelineOptions opts;
   opts.threads = threads;
   opts.slice_rows = slice_rows;
+  opts.fused_chroma = FusedChroma::two_pass;  // tests compare to the unfused ops
   std::unique_ptr<Pipeline> p;
   std::string error;
   const Status s = Pipeline::create(chain, in, opts, p, &error);

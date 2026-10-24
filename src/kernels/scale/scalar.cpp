@@ -36,6 +36,7 @@ void fill_scalar(Table& t) {
   t.hscale[3] = &hscale_row<3>;
   t.hscale[4] = &hscale_row<4>;
   t.vscale = &vscale_row;
+  fill_scalar_q7(t);
 }
 
 }  // namespace lanecast::kernels::scale

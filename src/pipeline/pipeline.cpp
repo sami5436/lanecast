@@ -261,9 +261,10 @@ Status build_eq(const FilterSpec& f, const VideoInfo& cur, std::unique_ptr<Stage
 
 // Replaces the last stage (a scale) and `stage` (a yuv to rgb convert) with
 // one ScaleConvert when they are adjacent. On success `stage` is the fused
-// stage and the scale stage is gone from `stages`.
+// stage and the scale stage is gone from `stages`. A format stage that asks
+// for nearest chroma keeps the two-pass path, which is where nearest applies.
 void fuse_scale_convert(std::vector<std::unique_ptr<Stage>>& stages,
-                        std::unique_ptr<Stage>& stage) {
+                        std::unique_ptr<Stage>& stage, FusedChroma chroma) {
   if (stages.empty()) return;
   const auto* sc = dynamic_cast<const ScaleStage*>(stages.back().get());
   const auto* cv = dynamic_cast<const ConvertStage*>(stage.get());
@@ -271,7 +272,9 @@ void fuse_scale_convert(std::vector<std::unique_ptr<Stage>>& stages,
   auto fused = std::make_unique<ScaleConvertStage>();
   if (ScaleConvert::create(sc->input.format, sc->input.width, sc->input.height,
                            cv->output.format, sc->output.width, sc->output.height, sc->filter,
-                           cv->opts, fused->fused) != Status::ok) {
+                           cv->opts, fused->fused,
+                           cv->opts.chroma == ChromaMode::nearest ? FusedChroma::two_pass
+                                                                  : chroma) != Status::ok) {
     return;  // not a yuv to rgb pair: keep the two stages
   }
   fused->output = cv->output;
@@ -315,7 +318,7 @@ Status Pipeline::create(std::string_view chain, const VideoInfo& input,
       s = build_scale(f, cur, stage, error);
     } else if (f.name == "format") {
       s = build_format(f, cur, stage, error);
-      if (s == Status::ok && stage) fuse_scale_convert(impl->stages, stage);
+      if (s == Status::ok && stage) fuse_scale_convert(impl->stages, stage, opts.fused_chroma);
     } else if (f.name == "blur") {
       s = build_blur(f, cur, stage, error);
     } else {
