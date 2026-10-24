@@ -21,8 +21,26 @@ void blend_row(const std::uint8_t* over, std::uint8_t* base, int pixels) {
   }
 }
 
+void lut_row(const std::uint8_t* src, std::uint8_t* dst, int count, const std::uint8_t* lut) {
+  for (int i = 0; i < count; ++i) dst[i] = lut[src[i]];
+}
+
+void lut_skip_alpha_row(const std::uint8_t* src, std::uint8_t* dst, int pixels,
+                        const std::uint8_t* lut) {
+  for (int i = 0; i < pixels; ++i, src += 4, dst += 4) {
+    dst[0] = lut[src[0]];
+    dst[1] = lut[src[1]];
+    dst[2] = lut[src[2]];
+    dst[3] = src[3];
+  }
+}
+
 }  // namespace
 
-void fill_scalar(Table& t) { t.blend = &blend_row; }
+void fill_scalar(Table& t) {
+  t.blend = &blend_row;
+  t.lut = &lut_row;
+  t.lut_skip_alpha = &lut_skip_alpha_row;
+}
 
 }  // namespace lanecast::kernels::filter
