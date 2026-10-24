@@ -43,10 +43,18 @@ void add(std::vector<Comparison>& out, const std::string& name, PixelFormat from
 void add_convert_comparisons(std::vector<Comparison>& out) {
   using F = PixelFormat;
   constexpr unsigned kBilinear = SWS_BILINEAR | SWS_FULL_CHR_H_INT | SWS_ACCURATE_RND;
-  add(out, "bilinear left", F::yuv420p, F::rgb24, kBilinear, ChromaMode::bilinear,
-      ChromaLocation::left);
-  add(out, "bilinear center", F::yuv420p, F::rgb24, kBilinear, ChromaMode::bilinear,
-      ChromaLocation::center);
+  for (const F to : {F::rgb24, F::rgba}) {
+    add(out, "bilinear left", F::yuv420p, to, kBilinear, ChromaMode::bilinear,
+        ChromaLocation::left);
+    add(out, "bilinear center", F::yuv420p, to, kBilinear, ChromaMode::bilinear,
+        ChromaLocation::center);
+    add(out, "nearest vs POINT", F::yuv420p, to, SWS_POINT, ChromaMode::nearest,
+        ChromaLocation::left);
+    // Default swscale flags (bicubic, fast chroma path): what a plain
+    // "-pix_fmt rgb24" gets.
+    add(out, "nearest vs default", F::yuv420p, to, SWS_BICUBIC, ChromaMode::nearest,
+        ChromaLocation::left);
+  }
 }
 
 }  // namespace lanecast::bench::ff
