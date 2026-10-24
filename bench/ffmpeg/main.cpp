@@ -33,6 +33,7 @@ void usage() {
 }
 
 bool parse(int argc, char** argv, Options& o) {
+  bool iters_set = false;
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
     const bool has_value = i + 1 < argc;
@@ -44,6 +45,7 @@ bool parse(int argc, char** argv, Options& o) {
       o.filter = argv[++i];
     } else if (a == "--iters" && has_value) {
       o.iters = std::atoi(argv[++i]);
+      iters_set = true;
     } else if (a == "--warmup" && has_value) {
       o.warmup = std::atoi(argv[++i]);
     } else if (a == "--threads" && has_value) {
@@ -52,7 +54,7 @@ bool parse(int argc, char** argv, Options& o) {
       return false;
     }
   }
-  if (o.quick) o.iters = 9;
+  if (o.quick && !iters_set) o.iters = 9;
   return o.iters >= 1 && o.warmup >= 0 && o.threads >= 0;
 }
 
