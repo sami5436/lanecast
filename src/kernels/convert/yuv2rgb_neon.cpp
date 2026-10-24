@@ -123,7 +123,7 @@ inline void bilinear_row(const std::uint8_t* y, std::uint8_t* dst, int width, co
 template <int P>
 void yuv420_bilinear_row(const std::uint8_t* y, const std::uint8_t* u0, const std::uint8_t* u1,
                          const std::uint8_t* v0, const std::uint8_t* v1, std::uint8_t* dst,
-                         int width, const YuvToRgbCoeffs& cf) {
+                         int width, const YuvToRgbCoeffs& cf, ChromaLocation) {
   bilinear_row<P>(y, dst, width, make_coef(cf), [&](int cx) {
     return Vert{vert(vld1_u8(u0 + cx), vld1_u8(u1 + cx)),
                 vert(vld1_u8(v0 + cx), vld1_u8(v1 + cx))};
@@ -132,7 +132,7 @@ void yuv420_bilinear_row(const std::uint8_t* y, const std::uint8_t* u0, const st
 
 template <int P>
 void nv12_bilinear_row(const std::uint8_t* y, const std::uint8_t* uv0, const std::uint8_t* uv1,
-                       std::uint8_t* dst, int width, const YuvToRgbCoeffs& cf) {
+                       std::uint8_t* dst, int width, const YuvToRgbCoeffs& cf, ChromaLocation) {
   bilinear_row<P>(y, dst, width, make_coef(cf), [&](int cx) {
     const uint8x8x2_t a = vld2_u8(uv0 + 2 * cx), b = vld2_u8(uv1 + 2 * cx);
     return Vert{vert(a.val[0], b.val[0]), vert(a.val[1], b.val[1])};

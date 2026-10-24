@@ -66,7 +66,7 @@ void nv12_nearest_row(const std::uint8_t* y, const std::uint8_t* uv, std::uint8_
 template <int P>
 void yuv420_bilinear_row(const std::uint8_t* y, const std::uint8_t* u0, const std::uint8_t* u1,
                          const std::uint8_t* v0, const std::uint8_t* v1, std::uint8_t* dst,
-                         int width, const YuvToRgbCoeffs& c) {
+                         int width, const YuvToRgbCoeffs& c, ChromaLocation) {
   const int cw = (width + 1) >> 1;
   for (int x = 0; x < width; ++x) {
     const int cx = x >> 1, cxn = std::min(cx + 1, cw - 1);
@@ -78,7 +78,7 @@ void yuv420_bilinear_row(const std::uint8_t* y, const std::uint8_t* u0, const st
 
 template <int P>
 void nv12_bilinear_row(const std::uint8_t* y, const std::uint8_t* uv0, const std::uint8_t* uv1,
-                       std::uint8_t* dst, int width, const YuvToRgbCoeffs& c) {
+                       std::uint8_t* dst, int width, const YuvToRgbCoeffs& c, ChromaLocation) {
   const int cw = (width + 1) >> 1;
   for (int x = 0; x < width; ++x) {
     const int cx = x >> 1, cxn = std::min(cx + 1, cw - 1);
@@ -126,7 +126,7 @@ void luma_rows(const std::uint8_t* s0, const std::uint8_t* s1, std::uint8_t* y0,
 template <int P>
 void packed_to_yuv420_row(const std::uint8_t* s0, const std::uint8_t* s1, std::uint8_t* y0,
                           std::uint8_t* y1, std::uint8_t* u, std::uint8_t* v, int width,
-                          const RgbToYuvCoeffs& k) {
+                          const RgbToYuvCoeffs& k, ChromaLocation) {
   luma_rows<P>(s0, s1, y0, y1, width, k);
   for (int cx = 0; cx < (width + 1) / 2; ++cx) {
     int cu, cv;
@@ -138,7 +138,8 @@ void packed_to_yuv420_row(const std::uint8_t* s0, const std::uint8_t* s1, std::u
 
 template <int P>
 void packed_to_nv12_row(const std::uint8_t* s0, const std::uint8_t* s1, std::uint8_t* y0,
-                        std::uint8_t* y1, std::uint8_t* uv, int width, const RgbToYuvCoeffs& k) {
+                        std::uint8_t* y1, std::uint8_t* uv, int width, const RgbToYuvCoeffs& k,
+                        ChromaLocation) {
   luma_rows<P>(s0, s1, y0, y1, width, k);
   for (int cx = 0; cx < (width + 1) / 2; ++cx) {
     int cu, cv;

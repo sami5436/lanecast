@@ -116,13 +116,14 @@ void packed_to_yuv_row(const std::uint8_t* s0, const std::uint8_t* s1, std::uint
 template <int P>
 void packed_to_yuv420_row(const std::uint8_t* s0, const std::uint8_t* s1, std::uint8_t* y0,
                           std::uint8_t* y1, std::uint8_t* u, std::uint8_t* v, int width,
-                          const RgbToYuvCoeffs& k) {
+                          const RgbToYuvCoeffs& k, ChromaLocation) {
   packed_to_yuv_row<P, false>(s0, s1, y0, y1, u, v, width, k);
 }
 
 template <int P>
 void packed_to_nv12_row(const std::uint8_t* s0, const std::uint8_t* s1, std::uint8_t* y0,
-                        std::uint8_t* y1, std::uint8_t* uv, int width, const RgbToYuvCoeffs& k) {
+                        std::uint8_t* y1, std::uint8_t* uv, int width, const RgbToYuvCoeffs& k,
+                        ChromaLocation) {
   packed_to_yuv_row<P, true>(s0, s1, y0, y1, uv, uv, width, k);
 }
 

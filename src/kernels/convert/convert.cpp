@@ -43,7 +43,7 @@ Status yuv_to_packed(const Frame& src, Frame& dst, const ConvertOptions& opts, R
       if (bilinear) {
         const auto fn = t.nv12_bilinear_to_packed[packed];
         if (fn == nullptr) return Status::not_implemented;
-        fn(py.row(y), pu.row(cy), pu.row(cyn), pd.row(y), w, c);
+        fn(py.row(y), pu.row(cy), pu.row(cyn), pd.row(y), w, c, opts.chroma_loc);
       } else {
         const auto fn = t.nv12_to_packed[packed];
         if (fn == nullptr) return Status::not_implemented;
@@ -52,7 +52,8 @@ Status yuv_to_packed(const Frame& src, Frame& dst, const ConvertOptions& opts, R
     } else if (bilinear) {
       const auto fn = t.yuv420_bilinear_to_packed[packed];
       if (fn == nullptr) return Status::not_implemented;
-      fn(py.row(y), pu.row(cy), pu.row(cyn), pv.row(cy), pv.row(cyn), pd.row(y), w, c);
+      fn(py.row(y), pu.row(cy), pu.row(cyn), pv.row(cy), pv.row(cyn), pd.row(y), w, c,
+         opts.chroma_loc);
     } else {
       const auto fn = t.yuv420_to_packed[packed];
       if (fn == nullptr) return Status::not_implemented;
@@ -86,10 +87,11 @@ Status packed_to_yuv(const Frame& src, Frame& dst, const ConvertOptions& opts, R
   for (int y = r.begin; y < r.end; y += 2) {
     const int y1 = std::min(y + 1, last);  // odd height: the last row pairs with itself
     if (nv12) {
-      fn12(ps.row(y), ps.row(y1), py.row(y), py.row(y1), pu.row(y >> 1), src.width(), k);
+      fn12(ps.row(y), ps.row(y1), py.row(y), py.row(y1), pu.row(y >> 1), src.width(), k,
+           opts.chroma_loc);
     } else {
       fn420(ps.row(y), ps.row(y1), py.row(y), py.row(y1), pu.row(y >> 1), pv.row(y >> 1),
-            src.width(), k);
+            src.width(), k, opts.chroma_loc);
     }
   }
   return Status::ok;
