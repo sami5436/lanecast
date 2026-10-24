@@ -184,5 +184,161 @@ TEST(ParseRejectsBadChains) {
   }
 }
 
+VideoInfo info_of(PixelFormat fmt, int w, int h) {
+  VideoInfo v;
+  v.format = fmt;
+  v.width = w;
+  v.height = h;
+  return v;
+}
+
+std::unique_ptr<Pipeline> make_pipeline(const std::string& chain, const VideoInfo& in,
+                                        int threads, int slice_rows = 32,
+                                        Status expect = Status::ok) {
+  PipelineOptions opts;
+  opts.threads = threads;
+  opts.slice_rows = slice_rows;
+  std::unique_ptr<Pipeline> p;
+  std::string error;
+  const Status s = Pipeline::create(chain, in, opts, p, &error);
+  CHECK_MSG(s == expect, chain + ": " + error);
+  return p;
+}
+
+TEST(PipelineOutputInfo) {
+  auto p = make_pipeline("scale=-2:360,format=rgb24", info_of(PixelFormat::yuv420p, 1920, 1080), 1);
+  REQUIRE(p != nullptr);
+  CHECK_EQ(p->output_info().width, 640);
+  CHECK_EQ(p->output_info().height, 360);
+  CHECK(p->output_info().format == PixelFormat::rgb24);
+
+  p = make_pipeline("scale=-1:100", info_of(PixelFormat::yuv420p, 150, 60), 1);
+  REQUIRE(p != nullptr);
+  CHECK_EQ(p->output_info().width, 250);
+
+  p = make_pipeline("scale=w=0:h=-2", info_of(PixelFormat::rgb24, 33, 21), 1);
+  REQUIRE(p != nullptr);
+  CHECK_EQ(p->output_info().width, 33);
+  CHECK_EQ(p->output_info().height, 22);
+
+  p = make_pipeline("scale=-1:-1", info_of(PixelFormat::rgb24, 33, 21), 1);
+  REQUIRE(p != nullptr);
+  CHECK_EQ(p->output_info().width, 33);
+  CHECK_EQ(p->output_info().height, 21);
+
+  p = make_pipeline("format=yuv420p:matrix=bt709:range=full", info_of(PixelFormat::rgb24, 8, 8), 1);
+  REQUIRE(p != nullptr);
+  CHECK(p->output_info().matrix == ColorMatrix::bt709);
+  CHECK(p->output_info().range == ColorRange::full);
+}
+
+TEST(PipelineCreateRejectsBadValues) {
+  const VideoInfo in = info_of(PixelFormat::yuv420p, 64, 48);
+  const char* const bad[] = {
+      "scale=abc:10",         "scale=10:20:flags=bicubic", "scale=99999:10",
+      "format=nosuchfmt",     "format=rgb24:matrix=bt2020", "format=rgb24:range=wide",
+      "format=rgb24:chroma=cubic", "blur=4",               "eq=brightness=300",
+      "eq=contrast=5",        "eq=contrast=x",             "nosuchfilter",
+      "scale=10",
+  };
+  for (const char* chain : bad) {
+    std::unique_ptr<Pipeline> p;
+    std::string error;
+    const Status s = Pipeline::create(chain, in, {}, p, &error);
+    CHECK_MSG(s != Status::ok && p == nullptr && !error.empty(), chain);
+  }
+  std::unique_ptr<Pipeline> p;
+  CHECK(Pipeline::create("", info_of(PixelFormat::yuv420p, 0, 4), {}, p) != Status::ok);
+}
+
+TEST(PipelineEmptyChainCopies) {
+  Frame in = test::random_frame(PixelFormat::yuv420p, 13, 7, 5);
+  auto p = make_pipeline("", info_of(PixelFormat::yuv420p, 13, 7), 2);
+  REQUIRE(p != nullptr);
+  Frame out;
+  REQUIRE_OK(p->process(in, out));
+  CHECK_MSG(test::first_difference(in, out).empty(), test::first_difference(in, out));
+}
+
+TEST(PipelineMatchesDirectOps) {
+  Frame in = test::random_frame(PixelFormat::yuv420p, 67, 45, 11);
+  Frame scaled;
+  REQUIRE_OK(Frame::allocate(PixelFormat::yuv420p, 33, 20, scaled));
+  REQUIRE_OK(scale(in, scaled, ScaleFilter::area));
+  Frame expected;
+  REQUIRE_OK(Frame::allocate(PixelFormat::rgb24, 33, 20, expected));
+  ConvertOptions co;
+  co.matrix = ColorMatrix::bt709;
+  co.chroma = ChromaMode::nearest;
+  REQUIRE_OK(convert(scaled, expected, co));
+
+  for (const int threads : {1, 4}) {
+    auto p = make_pipeline("scale=33:20:flags=area,format=rgb24:matrix=bt709:chroma=nearest",
+                           info_of(PixelFormat::yuv420p, 67, 45), threads, 2);
+    REQUIRE(p != nullptr);
+    Frame out;
+    REQUIRE_OK(p->process(in, out));
+    CHECK_MSG(test::first_difference(expected, out).empty(), test::first_difference(expected, out));
+  }
+}
+
+TEST(PipelineThreadedEqualsSingleThread) {
+  struct Case {
+    PixelFormat fmt;
+    const char* chain;
+  };
+  const Case cases[] = {
+      {PixelFormat::yuv420p, "scale=61:37"},
+      {PixelFormat::yuv420p, "scale=29:17:flags=area,format=rgb24"},
+      {PixelFormat::yuv420p, "format=rgba:matrix=bt709:range=full,scale=-2:25"},
+      {PixelFormat::yuv420p, "format=nv12,scale=40:31,format=bgra:chroma=nearest"},
+      {PixelFormat::nv12, "scale=45:51,format=rgb24"},
+      {PixelFormat::rgb24, "scale=23:44:flags=area,format=yuv420p"},
+      {PixelFormat::rgba, "format=nv12:matrix=bt709,scale=17:9"},
+      {PixelFormat::gray8, "scale=50:41,format=rgb24"},
+      {PixelFormat::yuv420p, "scale=100:30,format=rgb24,scale=51:15,format=yuv420p"},
+      {PixelFormat::yuv420p, ""},
+      {PixelFormat::rgb24, "blur=3,eq=brightness=20:contrast=1.25,blur=5"},
+  };
+  const std::pair<int, int> sizes[] = {{1, 1}, {2, 3}, {7, 5}, {64, 33}, {97, 71}, {130, 50}};
+  for (const Case& c : cases) {
+    for (const auto& [w, h] : sizes) {
+      const VideoInfo vi = info_of(c.fmt, w, h);
+      Frame in = test::random_frame(c.fmt, w, h, static_cast<std::uint64_t>(w * 131 + h));
+      std::unique_ptr<Pipeline> ref = make_pipeline(c.chain, vi, 1);
+      if (ref == nullptr) continue;
+      Frame expected;
+      const Status rs = ref->process(in, expected);
+      if (rs == Status::not_implemented) continue;  // filter ops not built yet
+      REQUIRE_OK(rs);
+      for (const auto& [threads, slice_rows] : {std::pair{2, 32}, {3, 2}, {8, 1}, {0, 4}}) {
+        auto p = make_pipeline(c.chain, vi, threads, slice_rows);
+        REQUIRE(p != nullptr);
+        Frame out = test::random_frame(p->output_info().format, p->output_info().width,
+                                       p->output_info().height, 99);  // stale contents
+        for (int run = 0; run < 2; ++run) {
+          REQUIRE_OK(p->process(in, out));
+          const std::string d = test::first_difference(expected, out);
+          CHECK_MSG(d.empty(), std::string(c.chain) + " " + std::to_string(w) + "x" +
+                                   std::to_string(h) + " threads " + std::to_string(threads) +
+                                   ": " + d);
+        }
+      }
+    }
+  }
+}
+
+TEST(PipelineProcessRejectsMismatchedInput) {
+  auto p = make_pipeline("format=rgb24", info_of(PixelFormat::yuv420p, 16, 16), 1);
+  REQUIRE(p != nullptr);
+  Frame wrong_size = test::random_frame(PixelFormat::yuv420p, 18, 16, 1);
+  Frame wrong_format = test::random_frame(PixelFormat::nv12, 16, 16, 1);
+  Frame out;
+  CHECK_EQ(p->process(wrong_size, out), Status::invalid_argument);
+  CHECK_EQ(p->process(wrong_format, out), Status::invalid_argument);
+  Frame empty;
+  CHECK_EQ(p->process(empty, out), Status::invalid_argument);
+}
+
 }  // namespace
 }  // namespace lanecast
