@@ -83,10 +83,12 @@ struct Table {
 void fill_scalar(Table& t);
 void fill_scalar_fast(Table& t);  // called by fill_scalar
 void fill_neon(Table& t);
+void fill_neon_dotprod(Table& t);
 // Called by fill_neon; split into their own TUs to keep files small.
 void fill_neon_yuv2rgb(Table& t);
 void fill_neon_rgb2yuv(Table& t);
 void fill_neon_fast(Table& t);
+void fill_neon_dotprod_yuv2rgb(Table& t);  // called by fill_neon_dotprod
 void fill_sse41(Table& t);
 void fill_avx2(Table& t);
 // Called by fill_sse41 / fill_avx2, likewise split by direction.

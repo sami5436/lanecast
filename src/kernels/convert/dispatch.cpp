@@ -8,6 +8,7 @@ const detail::Dispatcher<Table>& dispatcher() {
   static const detail::Dispatcher<Table> d({
       .scalar = &fill_scalar,
       .neon = LANECAST_IF_NEON(fill_neon),
+      .neon_dotprod = LANECAST_IF_NEON_DOTPROD(fill_neon_dotprod),
       .sse41 = LANECAST_IF_SSE41(fill_sse41),
       .avx2 = LANECAST_IF_AVX2(fill_avx2),
   });
