@@ -20,8 +20,25 @@
 //   R = clamp8((c.cy * y + c.crv * v           + 4096) >> 13)
 //   G = clamp8((c.cy * y - c.cgu * u - c.cgv * v + 4096) >> 13)
 //   B = clamp8((c.cy * y + c.cbu * u           + 4096) >> 13)
-//   Chroma upsampling is nearest: pixel (x, y) uses chroma sample
-//   (x >> 1, y >> 1). Every coefficient fits int16 (for madd / vmull).
+//   Every coefficient fits int16 (for madd / vmull). U and V below are the
+//   upsampled 8-bit chroma values for pixel (x, y); with w, h the luma size,
+//   cw = (w + 1) >> 1 and ch = (h + 1) >> 1 the chroma plane size, and
+//   C[cx, cy] the chroma sample (U or V) at column cx, row cy.
+//
+// Chroma upsampling (yuv420p, nv12), ConvertOptions::chroma:
+//   nearest:  U = C[x >> 1, y >> 1].
+//   bilinear: assumes MPEG-2 / H.264 siting: chroma column cx is co-sited with
+//   luma column 2*cx, chroma row cy is centered between luma rows 2*cy and
+//   2*cy + 1. With cx = x >> 1, cy = y >> 1 and edge replication
+//   (indices clamped to [0, cw - 1] and [0, ch - 1]):
+//     cxn = min(cx + 1, cw - 1)
+//     cyn = clamp(cy + ((y & 1) ? 1 : -1), 0, ch - 1)   (the vertical neighbor)
+//     V[i] = 3 * C[i, cy] + C[i, cyn]                    (vertical, weights 3:1)
+//     H    = (x & 1) ? V[cx] + V[cxn] : 2 * V[cx]        (horizontal, 1:1 or 1:0)
+//     U    = (H + 4) >> 3                                 (one rounding, Q3)
+//   H never exceeds 2040, so every intermediate fits int16. The result is
+//   rounded to 8 bits before the matrix step. Flat chroma is
+//   reproduced exactly.
 //
 // RGB to YUV, Q15 coefficients k = rgb_to_yuv_coeffs(matrix, range):
 //   Y = clamp8((k.yr * R + k.yg * G + k.yb * B + (k.y_offset << 15) + 16384) >> 15)
@@ -43,9 +60,13 @@
 
 namespace lanecast {
 
+// Chroma upsampling used for yuv420p / nv12 -> rgb (formulas above).
+enum class ChromaMode : std::uint8_t { nearest, bilinear };
+
 struct ConvertOptions {
   ColorMatrix matrix = ColorMatrix::bt601;
   ColorRange range = ColorRange::limited;  // range of the YUV side
+  ChromaMode chroma = ChromaMode::bilinear;
 };
 
 struct YuvToRgbCoeffs {
