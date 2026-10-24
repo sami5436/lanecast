@@ -222,8 +222,39 @@ inline uint8x16_t pack16(int32x4_t a0, int32x4_t a1, int32x4_t a2, int32x4_t a3)
                      vqmovn_u16(vcombine_u16(round_narrow(a2), round_narrow(a3))));
 }
 
+// Fixed tap count: row pointers and weights stay in registers and the tap loop
+// unrolls, 16 samples per step.
+template <int T>
+void vscale_t(const std::int16_t* const* rows, const std::int16_t* w, std::uint8_t* dst,
+              int count) {
+  const std::int16_t* r[T];
+  std::int16_t wk[T];
+  for (int k = 0; k < T; ++k) {
+    r[k] = rows[k];
+    wk[k] = w[k];
+  }
+  for (int i = 0; i < count; i += 16) {
+    int32x4_t c0 = vdupq_n_s32(0), c1 = c0, c2 = c0, c3 = c0;
+    for (int k = 0; k < T; ++k) {
+      const int16x8_t a = vld1q_s16(r[k] + i), b = vld1q_s16(r[k] + i + 8);
+      c0 = vmlal_n_s16(c0, vget_low_s16(a), wk[k]);
+      c1 = vmlal_high_n_s16(c1, a, wk[k]);
+      c2 = vmlal_n_s16(c2, vget_low_s16(b), wk[k]);
+      c3 = vmlal_high_n_s16(c3, b, wk[k]);
+    }
+    vst1q_u8(dst + i, pack16(c0, c1, c2, c3));
+  }
+}
+
 void vscale(const std::int16_t* const* rows, const std::int16_t* w, int taps, std::uint8_t* dst,
             int count) {
+  switch (taps) {
+    case 3: return vscale_t<3>(rows, w, dst, count);
+    case 4: return vscale_t<4>(rows, w, dst, count);
+    case 5: return vscale_t<5>(rows, w, dst, count);
+    case 6: return vscale_t<6>(rows, w, dst, count);
+    default: break;
+  }
   if (taps == 2) {
     const std::int16_t* r0 = rows[0];
     const std::int16_t* r1 = rows[1];
