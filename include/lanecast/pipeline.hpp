@@ -166,6 +166,11 @@ Status parse_filter_chain(std::string_view text, std::vector<FilterSpec>& out,
 struct PipelineOptions {
   int threads = 0;       // 0: hardware threads; 1: no threading
   int slice_rows = 32;   // target rows per slice (rounded to alignment)
+  // Chroma path of a fused scale + yuv to rgb pair. full resamples chroma
+  // once, like swscale's full_chroma_int; two_pass is faster and equals the
+  // unfused stages byte for byte. A format stage with chroma=nearest always
+  // uses two_pass.
+  FusedChroma fused_chroma = FusedChroma::full;
 };
 
 class Pipeline {
