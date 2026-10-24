@@ -35,21 +35,23 @@ using Yuv420ToPackedRowFn = void (*)(const std::uint8_t* y, const std::uint8_t* 
 using Yuv420BilinearToPackedRowFn = void (*)(const std::uint8_t* y, const std::uint8_t* u0,
                                              const std::uint8_t* u1, const std::uint8_t* v0,
                                              const std::uint8_t* v1, std::uint8_t* dst,
-                                             int width, const YuvToRgbCoeffs& c);
+                                             int width, const YuvToRgbCoeffs& c,
+                                             ChromaLocation loc);
 // One output row of nv12 -> packed. uv is the interleaved chroma row.
 using Nv12ToPackedRowFn = void (*)(const std::uint8_t* y, const std::uint8_t* uv,
                                    std::uint8_t* dst, int width, const YuvToRgbCoeffs& c);
 using Nv12BilinearToPackedRowFn = void (*)(const std::uint8_t* y, const std::uint8_t* uv0,
                                            const std::uint8_t* uv1, std::uint8_t* dst, int width,
-                                           const YuvToRgbCoeffs& c);
+                                           const YuvToRgbCoeffs& c, ChromaLocation loc);
 // Two source rows -> two luma rows and one chroma row. For the last row of
 // an odd height, src1 == src0 and y1 == y0.
 using PackedToYuv420RowFn = void (*)(const std::uint8_t* src0, const std::uint8_t* src1,
                                      std::uint8_t* y0, std::uint8_t* y1, std::uint8_t* u,
-                                     std::uint8_t* v, int width, const RgbToYuvCoeffs& k);
+                                     std::uint8_t* v, int width, const RgbToYuvCoeffs& k,
+                                     ChromaLocation loc);
 using PackedToNv12RowFn = void (*)(const std::uint8_t* src0, const std::uint8_t* src1,
                                    std::uint8_t* y0, std::uint8_t* y1, std::uint8_t* uv,
-                                   int width, const RgbToYuvCoeffs& k);
+                                   int width, const RgbToYuvCoeffs& k, ChromaLocation loc);
 using SwizzleRowFn = void (*)(const std::uint8_t* src, std::uint8_t* dst, int width);
 using InterleaveUvRowFn = void (*)(const std::uint8_t* u, const std::uint8_t* v,
                                    std::uint8_t* uv, int chroma_width);
@@ -77,6 +79,9 @@ struct Table {
 
 void fill_scalar(Table& t);
 void fill_neon(Table& t);
+// Called by fill_neon; split into their own TUs to keep files small.
+void fill_neon_yuv2rgb(Table& t);
+void fill_neon_rgb2yuv(Table& t);
 void fill_sse41(Table& t);
 void fill_avx2(Table& t);
 
