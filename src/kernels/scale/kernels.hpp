@@ -12,15 +12,20 @@ enum class Isa : std::uint8_t;
 
 namespace lanecast::kernels::scale {
 
-// POD view of a ScaleFilterTable (no std::vector in ISA files).
+// POD view of a ScaleFilterTable (no std::vector in ISA files). Rows are
+// padded for SIMD: output x has taps weights at weights[x * stride]; stride
+// is taps when taps <= 2, else taps rounded up to a multiple of 4. Padding
+// weights are zero and 16 more zeros follow the last row, so a kernel may
+// load whole vectors from any row.
 struct FilterView {
   int taps;
+  int stride;
   const std::int32_t* start;    // dst_size entries
-  const std::int16_t* weights;  // dst_size * taps entries, Q14
+  const std::int16_t* weights;  // Q14
 };
 
 // Horizontal pass of one row with C interleaved channels (C = table index):
-//   mid[x*C + c] = (sum_k w[x*taps + k] * src[(start[x] + k)*C + c] + 64) >> 7
+//   mid[x*C + c] = (sum_k w[x*stride + k] * src[(start[x] + k)*C + c] + 64) >> 7
 // for x in [0, dst_width). mid rows are scratch with the same 64-byte slack.
 using HScaleRowFn = void (*)(const std::uint8_t* src, std::int16_t* mid, int dst_width,
                              const FilterView& f);

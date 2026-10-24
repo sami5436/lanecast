@@ -4,7 +4,7 @@
 //   yuv420p, nv12          -> rgb24, rgba, bgra   (YUV to RGB, below)
 //   rgb24, rgba, bgra      -> yuv420p, nv12       (RGB to YUV, below)
 //   yuv420p <-> nv12                              (chroma (de)interleave, exact)
-//   rgb24, rgba, bgra      -> rgb24, rgba, bgra   (swizzle; added alpha = 255)
+//   rgb24, rgba, bgra      -> rgb24, rgba, bgra   (swizzle; alpha kept, added alpha = 255)
 //   gray8 -> yuv420p, nv12 (Y copied, U = V = 128)
 //   yuv420p, nv12 -> gray8 (Y copied, no range change)
 //   gray8 -> rgb24, rgba, bgra (R = G = B = Y, no range change)
@@ -20,16 +20,52 @@
 //   R = clamp8((c.cy * y + c.crv * v           + 4096) >> 13)
 //   G = clamp8((c.cy * y - c.cgu * u - c.cgv * v + 4096) >> 13)
 //   B = clamp8((c.cy * y + c.cbu * u           + 4096) >> 13)
-//   Chroma upsampling is nearest: pixel (x, y) uses chroma sample
-//   (x >> 1, y >> 1). Every coefficient fits int16 (for madd / vmull).
+//   Every coefficient fits int16 (for madd / vmull). U and V below are the
+//   upsampled 8-bit chroma values for pixel (x, y); with w, h the luma size,
+//   cw = (w + 1) >> 1 and ch = (h + 1) >> 1 the chroma plane size, and
+//   C[cx, cy] the chroma sample (U or V) at column cx, row cy.
+//
+// Chroma upsampling (yuv420p, nv12), ConvertOptions::chroma:
+//   nearest:  U = C[x >> 1, y >> 1].
+//   bilinear: assumes MPEG-2 / H.264 siting: chroma column cx is co-sited with
+//   luma column 2*cx, chroma row cy is centered between luma rows 2*cy and
+//   2*cy + 1. With cx = x >> 1, cy = y >> 1 and edge replication
+//   (indices clamped to [0, cw - 1] and [0, ch - 1]):
+//     cxn = min(cx + 1, cw - 1)
+//     cyn = clamp(cy + ((y & 1) ? 1 : -1), 0, ch - 1)   (the vertical neighbor)
+//     V[i] = 3 * C[i, cy] + C[i, cyn]                    (vertical, weights 3:1)
+//     H    = (x & 1) ? V[cx] + V[cxn] : 2 * V[cx]        (horizontal, 1:1 or 1:0)
+//     U    = (H + 4) >> 3                                 (one rounding, Q3)
+//   H never exceeds 2040, so every intermediate fits int16. The result is
+//   rounded to 8 bits before the matrix step. Flat chroma is
+//   reproduced exactly.
+//   With chroma_loc = center the chroma column is centered between luma
+//   columns 2*cx and 2*cx + 1, so the horizontal weights are 3:1 toward the
+//   nearer chroma column (same cxn, vertical V and cyn as above, but the
+//   horizontal neighbor is on the side of the pixel):
+//     cxo = clamp(cx + ((x & 1) ? 1 : -1), 0, cw - 1)
+//     H   = 3 * V[cx] + V[cxo]
+//     U   = (H + 8) >> 4                                 (one rounding, Q4)
+//   H never exceeds 4080.
 //
 // RGB to YUV, Q15 coefficients k = rgb_to_yuv_coeffs(matrix, range):
 //   Y = clamp8((k.yr * R + k.yg * G + k.yb * B + (k.y_offset << 15) + 16384) >> 15)
-//   Chroma sample (cx, cy) uses the 2x2 sums SR, SG, SB of pixels
-//   (2cx + i, 2cy + j), i, j in {0, 1}; coordinates past the right or bottom
-//   edge are clamped to the last column or row (odd sizes replicate):
+//   Chroma sample (cx, cy) uses the sums SR, SG, SB below; coordinates past
+//   the edges are clamped to the first or last column or row (odd sizes
+//   replicate). chroma_loc = center sums the 2x2 box of pixels
+//   (2cx + i, 2cy + j), i, j in {0, 1}, and shifts by 17:
 //   U = clamp8((k.ur * SR + k.ug * SG + k.ub * SB + (128 << 17) + 65536) >> 17)
 //   V = clamp8((k.vr * SR + k.vg * SG + k.vb * SB + (128 << 17) + 65536) >> 17)
+//   chroma_loc = left filters horizontally with [1 2 1] taps centered on the
+//   even luma column x0 = 2cx and averages the two rows, so each sum
+//   carries weight 8 and the shift is 18:
+//     SR = sum over j in {0, 1} of
+//          R[xm, 2cy + j] + 2 * R[x0, 2cy + j] + R[xp, 2cy + j]
+//     xm = max(x0 - 1, 0), xp = min(x0 + 1, w - 1); SG, SB likewise
+//     U  = clamp8((k.ur * SR + k.ug * SG + k.ub * SB + (128 << 18) + (1 << 17)) >> 18)
+//     V  = clamp8((k.vr * SR + k.vg * SG + k.vb * SB + (128 << 18) + (1 << 17)) >> 18)
+//   SR, SG, SB never exceed 2040. This is the decoder's inverse siting for
+//   the left upsample above.
 //   Coefficients were rounded once, then yg, ug, vg were adjusted so that
 //   yr + yg + yb == round(32768 * (limited ? 219/255 : 1)) and the U and V
 //   rows sum to 0: gray input gives exactly U = V = 128, white gives 235/255.
@@ -43,9 +79,14 @@
 
 namespace lanecast {
 
+// Chroma upsampling used for yuv420p / nv12 -> rgb (formulas above).
+enum class ChromaMode : std::uint8_t { nearest, bilinear };
+
 struct ConvertOptions {
   ColorMatrix matrix = ColorMatrix::bt601;
   ColorRange range = ColorRange::limited;  // range of the YUV side
+  ChromaMode chroma = ChromaMode::bilinear;
+  ChromaLocation chroma_loc = ChromaLocation::left;  // bilinear upsample and rgb to yuv downsample
 };
 
 struct YuvToRgbCoeffs {
