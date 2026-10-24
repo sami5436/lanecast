@@ -19,6 +19,14 @@ double psnr(const Frame& a, const Frame& b) {
 
 }  // namespace
 
+LanecastOp sliced_op(const Frame& dst, int src_row_alignment, std::function<Status(RowRange)> fn) {
+  const int height = dst.height();
+  const int align = std::max(src_row_alignment, pixfmt_row_alignment(dst.format()));
+  return [height, align, fn = std::move(fn)](ThreadPool* pool) {
+    return run_sliced(pool, height, align, fn);
+  };
+}
+
 unsigned reference_flags() {
   return SWS_LANCZOS | SWS_ACCURATE_RND | SWS_FULL_CHR_H_INT | SWS_FULL_CHR_H_INP | SWS_BITEXACT;
 }
@@ -50,7 +58,7 @@ void run_comparison(const Comparison& c, Pattern pattern, const Options& opts, i
     return;
   }
   const auto lc_op = c.lanecast(src, out_lc);
-  if (!lc_op || lc_op(RowRange{}) != Status::ok) {
+  if (!lc_op || lc_op(nullptr) != Status::ok) {
     notes.push_back("skipped " + c.op + ": lanecast side not implemented in this build");
     return;
   }
@@ -64,7 +72,6 @@ void run_comparison(const Comparison& c, Pattern pattern, const Options& opts, i
     return;
   }
 
-  const int align = std::max(pixfmt_row_alignment(c.src_format), pixfmt_row_alignment(c.dst_format));
   std::vector<int> counts = {1};
   if (threads > 1) counts.push_back(threads);
   for (const int t : counts) {
@@ -74,9 +81,7 @@ void run_comparison(const Comparison& c, Pattern pattern, const Options& opts, i
       return;
     }
     ThreadPool* p = t > 1 ? &pool : nullptr;
-    const auto run_lc = [&] {
-      (void)run_sliced(p, c.dst_height, align, [&](RowRange r) { return lc_op(r); });
-    };
+    const auto run_lc = [&] { (void)lc_op(p); };
     const auto run_sws = [&] { (void)sws->run(); };
     Row row;
     row.op = c.op;

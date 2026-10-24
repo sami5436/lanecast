@@ -17,7 +17,9 @@ constexpr int kHeight = 1080;
 
 LanecastBinder convert_binder(const ConvertOptions& opts) {
   return [opts](const Frame& src, Frame& dst) {
-    return [&src, &dst, opts](RowRange rows) { return convert(src, dst, opts, rows); };
+    return sliced_op(dst, pixfmt_row_alignment(src.format()), [&src, &dst, opts](RowRange rows) {
+      return convert(src, dst, opts, rows);
+    });
   };
 }
 

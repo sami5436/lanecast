@@ -12,9 +12,14 @@
 
 namespace lanecast::bench::ff {
 
-// Binds lanecast to a source and destination frame and returns the row-range
-// op, or an empty function when this build cannot run it (skipped, noted).
-using LanecastBinder = std::function<std::function<Status(RowRange)>(const Frame&, Frame&)>;
+// Binds lanecast to a source and destination frame and returns a whole-frame
+// op that runs on the pool (nullptr: one thread), or an empty function when
+// this build cannot run it (skipped, noted).
+using LanecastOp = std::function<Status(ThreadPool*)>;
+using LanecastBinder = std::function<LanecastOp(const Frame&, Frame&)>;
+
+// Splits destination rows over the pool for an op that is safe per row range.
+LanecastOp sliced_op(const Frame& dst, int src_row_alignment, std::function<Status(RowRange)> fn);
 
 struct Comparison {
   std::string op;
@@ -37,5 +42,6 @@ void run_comparison(const Comparison& c, Pattern pattern, const Options& opts, i
                     ThreadPool& pool, std::vector<Row>& rows, std::vector<std::string>& notes);
 
 void add_convert_comparisons(std::vector<Comparison>& out);
+void add_scale_comparisons(std::vector<Comparison>& out);
 
 }  // namespace lanecast::bench::ff
