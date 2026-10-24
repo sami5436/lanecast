@@ -8,6 +8,7 @@
 //     and L2 instead of materializing full-frame temporaries.
 #pragma once
 
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -72,19 +73,52 @@ class ThreadPool {
 Status run_sliced(ThreadPool* pool, int height, int alignment,
                   FunctionRef<Status(RowRange)> fn, int slice_rows = 32);
 
+// How the fused pass resamples chroma.
+enum class FusedChroma : std::uint8_t {
+  // Chroma is resampled once, from the source chroma plane straight to the
+  // destination luma size, then converted with 4:4:4 chroma and without
+  // rounding Y, U and V to 8 bits first. This is what libswscale does with
+  // full_chroma_int and gives the better picture.
+  full,
+  // Chroma is scaled to the subsampled destination plane and upsampled
+  // again by convert (opts.chroma). Faster, and bit-identical to
+  // scale() followed by convert(). The default of ScaleConvert::create.
+  two_pass,
+};
+
 // Fused yuv420p or nv12 -> scale -> rgb24, rgba or bgra in one pass per
 // row strip: each strip scales the Y and chroma rows it needs into
 // thread-local strip buffers and converts them straight into dst.
-// Bit-exact contract: the output equals
+//
+// Bit-exact contract, FusedChroma::two_pass: the output equals
 //   scale(src, tmp_yuv at dst size, filter, {}, opts.chroma_loc)
 //   followed by convert(tmp_yuv, dst, opts)
 // so it can be tested against the unfused ops.
+//
+// Bit-exact contract, FusedChroma::full (opts.chroma is ignored). Every
+// plane goes through the separable passes of scale.hpp up to the vertical
+// pass, whose rounding is replaced by (sum + 2^13) >> 14, leaving each
+// sample as int16 in Q7 (the 8-bit value times 128). Y is scaled from w x h
+// to dw x dh. Each chroma plane (U and V, or the interleaved UV of nv12)
+// with cw = (w + 1) >> 1 and ch = (h + 1) >> 1 is scaled from cw x ch to the
+// same dw x dh. The horizontal chroma table is
+// build_scale_filter(filter, cw, dw, pos_src, 128) with pos_src = 64 for
+// opts.chroma_loc = left (samples on the left luma column, swscale's
+// src_h_chr_pos) and 128 for center; the vertical one is
+// build_scale_filter(filter, ch, dh), centered on both sides. The three Q7
+// planes then go through the YUV to RGB matrix of convert.hpp with U and V
+// used as given (no upsampling), in Q20:
+//   ly = cy * (Y - (y_offset << 7)) + (1 << 19)
+//   R = clamp8((ly + crv * (V - 16384)) >> 20), G and B likewise
+// Destination rows are independent, so any even row range matches the
+// whole frame.
 class ScaleConvert {
  public:
   static Status create(PixelFormat src_format, int src_width, int src_height,
                        PixelFormat dst_format, int dst_width, int dst_height,
                        ScaleFilter filter, const ConvertOptions& opts,
-                       std::unique_ptr<ScaleConvert>& out);
+                       std::unique_ptr<ScaleConvert>& out,
+                       FusedChroma chroma = FusedChroma::two_pass);
   ~ScaleConvert();
   ScaleConvert(const ScaleConvert&) = delete;
   ScaleConvert& operator=(const ScaleConvert&) = delete;
