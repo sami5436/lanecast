@@ -34,6 +34,12 @@ struct Planar16 {
   __m128i r, g, b, a;
 };
 
+// Two int16 values as one 32-bit lane, for pmaddwd against interleaved data.
+inline std::int32_t pair16(int lo, int hi) {
+  return static_cast<std::int32_t>(static_cast<std::uint32_t>(static_cast<std::uint16_t>(lo)) |
+                                   static_cast<std::uint32_t>(static_cast<std::uint16_t>(hi)) << 16);
+}
+
 // A pshufb control vector. Index -128 (0x80) zeroes the byte.
 struct alignas(16) Shuf {
   std::int8_t b[16];

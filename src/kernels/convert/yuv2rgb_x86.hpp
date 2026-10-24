@@ -13,12 +13,6 @@
 namespace lanecast::kernels::convert {
 namespace {
 
-// Two int16 values as one 32-bit lane, for pmaddwd against interleaved data.
-inline std::int32_t pair16(int lo, int hi) {
-  return static_cast<std::int32_t>(static_cast<std::uint32_t>(static_cast<std::uint16_t>(lo)) |
-                                   static_cast<std::uint32_t>(static_cast<std::uint16_t>(hi)) << 16);
-}
-
 // Duplicates each of the even (or odd) bytes: u u u u ... for nv12 nearest.
 constexpr Shuf kDupEven = {{0, 0, 2, 2, 4, 4, 6, 6, 8, 8, 10, 10, 12, 12, 14, 14}};
 constexpr Shuf kDupOdd = {{1, 1, 3, 3, 5, 5, 7, 7, 9, 9, 11, 11, 13, 13, 15, 15}};
