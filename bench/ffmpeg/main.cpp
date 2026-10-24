@@ -68,6 +68,7 @@ int main(int argc, char** argv) {
 
   std::vector<Comparison> all;
   add_convert_comparisons(all);
+  add_scale_comparisons(all);
 
   ThreadPool pool(threads);
   std::vector<Row> rows;
