@@ -8,10 +8,10 @@
 //     and L2 instead of materializing full-frame temporaries.
 #pragma once
 
-#include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -22,6 +22,29 @@
 
 namespace lanecast {
 
+// Non-owning reference to a callable, valid for the duration of the call it
+// is passed to. Unlike std::function it never allocates.
+template <class Sig>
+class FunctionRef;
+template <class R, class... Args>
+class FunctionRef<R(Args...)> {
+ public:
+  template <class F, class = std::enable_if_t<!std::is_same_v<std::decay_t<F>, FunctionRef>>>
+  FunctionRef(F&& f) noexcept  // NOLINT: implicit by design
+      : obj_(const_cast<void*>(static_cast<const void*>(std::addressof(f)))),
+        call_([](void* o, Args... args) -> R {
+          return (*static_cast<std::add_pointer_t<F>>(o))(std::forward<Args>(args)...);
+        }) {}
+  R operator()(Args... args) const { return call_(obj_, std::forward<Args>(args)...); }
+
+ private:
+  void* obj_;
+  R (*call_)(void*, Args...);
+};
+
+// Persistent worker threads. Workers spin briefly after a job and then park
+// on a condition variable, so back-to-back stages see no wake-up latency and
+// idle pools cost nothing.
 class ThreadPool {
  public:
   explicit ThreadPool(int threads = 0);  // 0: std::thread::hardware_concurrency
@@ -31,8 +54,9 @@ class ThreadPool {
 
   int size() const noexcept;  // worker count including the calling thread
   // Calls fn(i) for every i in [0, count) on the pool and the calling
-  // thread, and returns when all calls are done. Not reentrant.
-  void parallel_for(int count, const std::function<void(int)>& fn);
+  // thread, and returns when all calls are done. No allocation. Not
+  // reentrant and not safe to call from two threads at once.
+  void parallel_for(int count, FunctionRef<void(int)> fn);
 
   struct Impl;
 
@@ -40,11 +64,12 @@ class ThreadPool {
   std::unique_ptr<Impl> impl_;
 };
 
-// Splits rows [0, height) into about `slices` ranges whose starts are
-// multiples of `alignment` (use pixfmt_row_alignment) and runs fn on the
-// pool. Returns the first non-ok status. pool == nullptr runs inline.
+// Splits rows [0, height) into disjoint ranges whose starts are multiples of
+// `alignment` (use pixfmt_row_alignment), about `slice_rows` rows each but
+// never fewer slices than pool threads when the height allows, and runs fn
+// on the pool. Returns the first non-ok status. pool == nullptr runs inline.
 Status run_sliced(ThreadPool* pool, int height, int alignment,
-                  const std::function<Status(RowRange)>& fn);
+                  FunctionRef<Status(RowRange)> fn, int slice_rows = 32);
 
 // Fused yuv420p or nv12 -> scale -> rgb24, rgba or bgra in one pass per
 // row strip: each strip scales the Y and chroma rows it needs into
