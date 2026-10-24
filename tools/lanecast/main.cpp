@@ -36,7 +36,7 @@ void print_usage(std::FILE* out) {
       "  -vf CHAIN       filter chain, e.g. scale=1280:720,format=rgb24\n"
       "                  scale=W:H[:flags=bilinear|area]   W or H of -1 / -2 keeps the aspect\n"
       "                  format=PIXFMT[:matrix=bt601|bt709][:range=limited|full]\n"
-      "                         [:chroma=nearest|bilinear]\n"
+      "                         [:chroma=nearest|bilinear][:precision=exact|fast]\n"
       "                  blur=3|5   eq=brightness=B:contrast=C\n"
       "  -threads N      worker threads (default: all hardware threads, 1 disables)\n"
       "  -frames N       stop after N frames\n"

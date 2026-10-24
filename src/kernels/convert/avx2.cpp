@@ -60,6 +60,7 @@ void fill_avx2(Table& t) {
   t.interleave_uv = &interleave_uv_row;
   t.deinterleave_uv = &deinterleave_uv_row;
   fill_avx2_yuv2rgb(t);
+  fill_avx2_fast(t);
   fill_avx2_rgb2yuv(t);
 }
 

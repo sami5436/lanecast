@@ -24,7 +24,8 @@ LanecastBinder convert_binder(const ConvertOptions& opts) {
 }
 
 void add(std::vector<Comparison>& out, const std::string& name, PixelFormat from, PixelFormat to,
-         unsigned flags, ChromaMode mode, ChromaLocation loc) {
+         unsigned flags, ChromaMode mode, ChromaLocation loc,
+         Precision precision = Precision::exact) {
   Comparison c;
   c.op = std::string(pixfmt_name(from)) + ">" + std::string(pixfmt_name(to)) + " " + name;
   c.src_format = from;
@@ -36,6 +37,7 @@ void add(std::vector<Comparison>& out, const std::string& name, PixelFormat from
   ConvertOptions o;
   o.chroma = mode;
   o.chroma_loc = loc;
+  o.precision = precision;
   c.lanecast = convert_binder(o);
   out.push_back(std::move(c));
 }
@@ -52,10 +54,14 @@ void add_convert_comparisons(std::vector<Comparison>& out) {
         ChromaLocation::center);
     add(out, "nearest vs POINT", F::yuv420p, to, SWS_POINT, ChromaMode::nearest,
         ChromaLocation::left);
+    add(out, "nearest fast vs POINT", F::yuv420p, to, SWS_POINT, ChromaMode::nearest,
+        ChromaLocation::left, Precision::fast);
     // Default swscale flags (bicubic, fast chroma path): what a plain
     // "-pix_fmt rgb24" gets.
     add(out, "nearest vs default", F::yuv420p, to, SWS_BICUBIC, ChromaMode::nearest,
         ChromaLocation::left);
+    add(out, "nearest fast vs default", F::yuv420p, to, SWS_BICUBIC, ChromaMode::nearest,
+        ChromaLocation::left, Precision::fast);
   }
   add(out, "left", F::rgba, F::yuv420p, kBilinear, ChromaMode::bilinear, ChromaLocation::left);
   add(out, "center", F::rgba, F::yuv420p, kBilinear, ChromaMode::bilinear,

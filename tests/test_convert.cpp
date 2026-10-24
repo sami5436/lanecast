@@ -627,3 +627,72 @@ TEST(bilinear_round_trip_beats_nearest_on_sharp_edges) {
     }
   }
 }
+
+namespace {
+
+int rmul(int a, int k) { return (a * k + 16384) >> 15; }
+
+// Straight-from-the-spec fast precision pixel (convert.hpp, "Fast precision").
+Rgb ref_rgb_fast(const Frame& f, int x, int y, const ConvertOptions& o) {
+  const YuvToRgbCoeffs c = yuv_to_rgb_coeffs(o.matrix, o.range);
+  const int yp = f.plane(0).row(y)[x] << 7;
+  const int up = chroma_at(f, 0, x / 2, y / 2) << 7, vp = chroma_at(f, 1, x / 2, y / 2) << 7;
+  const int ky = rmul(c.y_offset << 7, c.cy), m = 128 << 7;
+  const int ly = rmul(yp, c.cy);
+  const int r5 = ly + rmul(vp, c.crv) + 16 - ky - rmul(m, c.crv);
+  const int g5 =
+      ly + rmul(up, -c.cgu) + rmul(vp, -c.cgv) + 16 - ky + rmul(m, c.cgu) + rmul(m, c.cgv);
+  const int b5 = ly + rmul(up, c.cbu) + 16 - ky - rmul(m, c.cbu);
+  return {clamp8(r5 >> 5), clamp8(g5 >> 5), clamp8(b5 >> 5)};
+}
+
+}  // namespace
+
+TEST(fast_precision_matches_contract_and_stays_close_to_exact) {
+  std::uint64_t seed = 400;
+  for (const PixelFormat src : kYuvSources) {
+    for (const PixelFormat dst : kRgbTargets) {
+      for (const ColorMatrix m : kMatrices) {
+        for (const ColorRange r : kRanges) {
+          for (const auto& [w, h] : test::test_sizes()) {
+            const Frame in = test::random_frame(src, w, h, ++seed);
+            ConvertOptions o{m, r, ChromaMode::nearest};
+            Frame fast = test::random_frame(dst, w, h, ++seed);
+            Frame exact = test::random_frame(dst, w, h, ++seed);
+            REQUIRE_OK(convert(in, exact, o));
+            o.precision = Precision::fast;
+            REQUIRE_OK(convert(in, fast, o));
+            int bad = 0, far = 0;
+            for (int y = 0; y < h; ++y) {
+              for (int x = 0; x < w; ++x) {
+                const Rgb a = pixel(fast, x, y), b = ref_rgb_fast(in, x, y, o);
+                const Rgb e = pixel(exact, x, y);
+                bad += a.r != b.r || a.g != b.g || a.b != b.b;
+                far += std::abs(a.r - e.r) > 1 || std::abs(a.g - e.g) > 1 || std::abs(a.b - e.b) > 1;
+              }
+            }
+            const std::string at = std::string(pixfmt_name(src)) + " -> " +
+                                   std::string(pixfmt_name(dst)) + " " + std::to_string(w) + "x" +
+                                   std::to_string(h);
+            CHECK_MSG(bad == 0, at + ": " + std::to_string(bad) + " pixels differ from the contract");
+            CHECK_MSG(far == 0, at + ": " + std::to_string(far) + " pixels more than 1 from exact");
+          }
+        }
+      }
+    }
+  }
+}
+
+TEST(fast_precision_all_isas_match) {
+  for (const PixelFormat src : kYuvSources) {
+    for (const PixelFormat dst : kRgbTargets) {
+      for (const auto& [w, h] : test::test_sizes()) {
+        const Frame in = test::random_frame(src, w, h, 91 + w * 17 + h);
+        const ConvertOptions o{ColorMatrix::bt709, ColorRange::limited, ChromaMode::nearest,
+                               ChromaLocation::left, Precision::fast};
+        CHECK_ALL_ISAS_MATCH([&] { return test::random_frame(dst, w, h, 3); },
+                             [&](Frame& out) { return convert(in, out, o); });
+      }
+    }
+  }
+}

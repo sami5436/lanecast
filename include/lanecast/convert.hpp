@@ -69,6 +69,23 @@
 //   Coefficients were rounded once, then yg, ug, vg were adjusted so that
 //   yr + yg + yb == round(32768 * (limited ? 219/255 : 1)) and the U and V
 //   rows sum to 0: gray input gives exactly U = V = 128, white gives 235/255.
+//
+// Fast precision (ConvertOptions::precision = fast) applies to yuv420p and
+// nv12 -> rgb24, rgba, bgra with chroma = nearest; every other conversion
+// ignores it and uses the contract above. It has its own contract, shaped for
+// 16-bit lanes (NEON vqrdmulh, x86 pmulhrsw). With rmul(a, k) =
+// (a * k + 16384) >> 15 on int16 values, and the same Q13 coefficients c:
+//   Yp = Y << 7, Up = U << 7, Vp = V << 7                       (fit int16)
+//   ky = rmul(c.y_offset << 7, c.cy)
+//   bias_r = 16 - ky - rmul(128 << 7, c.crv)
+//   bias_g = 16 - ky + rmul(128 << 7, c.cgu) + rmul(128 << 7, c.cgv)
+//   bias_b = 16 - ky - rmul(128 << 7, c.cbu)
+//   R5 = rmul(Yp, c.cy) + rmul(Vp, c.crv) + bias_r
+//   G5 = rmul(Yp, c.cy) + rmul(Up, -c.cgu) + rmul(Vp, -c.cgv) + bias_g
+//   B5 = rmul(Yp, c.cy) + rmul(Up, c.cbu) + bias_b
+//   R = clamp8(R5 >> 5), G = clamp8(G5 >> 5), B = clamp8(B5 >> 5)
+// The 5 fractional bits keep every sum inside int16 (no wrap), so the order
+// of the additions does not matter.
 #pragma once
 
 #include <cstdint>
@@ -82,11 +99,16 @@ namespace lanecast {
 // Chroma upsampling used for yuv420p / nv12 -> rgb (formulas above).
 enum class ChromaMode : std::uint8_t { nearest, bilinear };
 
+// exact: the Q13 int32 contract. fast: the 16-bit contract above (nearest
+// chroma only), shaped for 16-bit SIMD lanes.
+enum class Precision : std::uint8_t { exact, fast };
+
 struct ConvertOptions {
   ColorMatrix matrix = ColorMatrix::bt601;
   ColorRange range = ColorRange::limited;  // range of the YUV side
   ChromaMode chroma = ChromaMode::bilinear;
   ChromaLocation chroma_loc = ChromaLocation::left;  // bilinear upsample and rgb to yuv downsample
+  Precision precision = Precision::exact;
 };
 
 struct YuvToRgbCoeffs {

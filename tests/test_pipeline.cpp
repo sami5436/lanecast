@@ -239,7 +239,7 @@ TEST(PipelineCreateRejectsBadValues) {
   const char* const bad[] = {
       "scale=abc:10",         "scale=10:20:flags=bicubic", "scale=99999:10",
       "format=nosuchfmt",     "format=rgb24:matrix=bt2020", "format=rgb24:range=wide",
-      "format=rgb24:chroma=cubic", "blur=4",               "eq=brightness=300",
+      "format=rgb24:chroma=cubic", "format=rgb24:precision=best", "blur=4",               "eq=brightness=300",
       "eq=contrast=5",        "eq=contrast=x",             "nosuchfilter",
       "scale=10",
   };
@@ -281,6 +281,36 @@ TEST(PipelineMatchesDirectOps) {
     Frame out;
     REQUIRE_OK(p->process(in, out));
     CHECK_MSG(test::first_difference(expected, out).empty(), test::first_difference(expected, out));
+  }
+}
+
+TEST(PipelinePrecisionFastMatchesDirectOps) {
+  Frame in = test::random_frame(PixelFormat::yuv420p, 67, 45, 12);
+  ConvertOptions co;
+  co.chroma = ChromaMode::nearest;
+  co.precision = Precision::fast;
+  Frame whole, scaled, scaled_rgb;
+  REQUIRE_OK(Frame::allocate(PixelFormat::rgb24, 67, 45, whole));
+  REQUIRE_OK(convert(in, whole, co));
+  REQUIRE_OK(Frame::allocate(PixelFormat::yuv420p, 33, 20, scaled));
+  REQUIRE_OK(scale(in, scaled, ScaleFilter::area, {}, ChromaLocation::left));
+  REQUIRE_OK(Frame::allocate(PixelFormat::rgb24, 33, 20, scaled_rgb));
+  REQUIRE_OK(convert(scaled, scaled_rgb, co));
+
+  // The second chain is fused into one scale and convert stage.
+  const struct {
+    const char* chain;
+    int w, h;
+    const Frame* expected;
+  } cases[] = {{"format=rgb24:chroma=nearest:precision=fast", 67, 45, &whole},
+               {"scale=33:20:flags=area,format=rgb24:chroma=nearest:precision=fast", 33, 20,
+                &scaled_rgb}};
+  for (const auto& c : cases) {
+    auto p = make_pipeline(c.chain, info_of(PixelFormat::yuv420p, 67, 45), 2);
+    REQUIRE(p != nullptr);
+    Frame out;
+    REQUIRE_OK(p->process(in, out));
+    CHECK_MSG(test::first_difference(*c.expected, out).empty(), c.chain);
   }
 }
 

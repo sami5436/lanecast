@@ -211,6 +211,15 @@ Status build_format(const FilterSpec& f, const VideoInfo& cur, std::unique_ptr<S
       return fail(error, "format: unknown chroma_loc '" + *v + "' (use left or center)");
     }
   }
+  if (const std::string* v = find_arg(f, "precision")) {
+    if (*v == "exact") {
+      st->opts.precision = Precision::exact;
+    } else if (*v == "fast") {
+      st->opts.precision = Precision::fast;
+    } else {
+      return fail(error, "format: unknown precision '" + *v + "' (use exact or fast)");
+    }
+  }
   if (!convert_supported(cur.format, *target)) {
     return fail(error, "format: cannot convert " + std::string(pixfmt_name(cur.format)) +
                            " to " + std::string(pixfmt_name(*target)));

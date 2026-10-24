@@ -172,6 +172,7 @@ Status ScaleConvert::run(const Frame& src, Frame& dst, RowRange rows) const {
 
   const bool nv12 = m.src_format == PixelFormat::nv12;
   const bool bilinear = m.opts.chroma == ChromaMode::bilinear;
+  const bool fast = !bilinear && m.opts.precision == Precision::fast;
   const auto& st = kernels::scale::active_table();
   const auto& ct = kernels::convert::active_table();
   const YuvToRgbCoeffs c = yuv_to_rgb_coeffs(m.opts.matrix, m.opts.range);
@@ -206,7 +207,7 @@ Status ScaleConvert::run(const Frame& src, Frame& dst, RowRange rows) const {
         if (fn == nullptr) return Status::not_implemented;
         fn(yr, crow(ubuf, cy), crow(ubuf, cyn), out, m.dst_w, c, m.opts.chroma_loc);
       } else if (nv12) {
-        const auto fn = ct.nv12_to_packed[m.packed];
+        const auto fn = fast ? ct.nv12_fast_to_packed[m.packed] : ct.nv12_to_packed[m.packed];
         if (fn == nullptr) return Status::not_implemented;
         fn(yr, crow(ubuf, cy), out, m.dst_w, c);
       } else if (bilinear) {
@@ -215,7 +216,8 @@ Status ScaleConvert::run(const Frame& src, Frame& dst, RowRange rows) const {
         fn(yr, crow(ubuf, cy), crow(ubuf, cyn), crow(vbuf, cy), crow(vbuf, cyn), out, m.dst_w, c,
            m.opts.chroma_loc);
       } else {
-        const auto fn = ct.yuv420_to_packed[m.packed];
+        const auto fn =
+            fast ? ct.yuv420_fast_to_packed[m.packed] : ct.yuv420_to_packed[m.packed];
         if (fn == nullptr) return Status::not_implemented;
         fn(yr, crow(ubuf, cy), crow(vbuf, cy), out, m.dst_w, c);
       }
