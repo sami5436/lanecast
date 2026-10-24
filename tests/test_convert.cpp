@@ -278,18 +278,280 @@ TEST(convert_supported_and_errors) {
   for (int s = 0; s < kPixelFormatCount; ++s) {
     for (int d = 0; d < kPixelFormatCount; ++d) {
       const auto sf = static_cast<PixelFormat>(s), df = static_cast<PixelFormat>(d);
-      const bool want = (sf == PixelFormat::yuv420p || sf == PixelFormat::nv12) &&
-                        (df == PixelFormat::rgb24 || df == PixelFormat::rgba ||
-                         df == PixelFormat::bgra);
-      CHECK_EQ(convert_supported(sf, df), want);
+      CHECK(convert_supported(sf, df));
       Frame in, out;
       REQUIRE_OK(Frame::allocate(sf, 4, 4, in));
       REQUIRE_OK(Frame::allocate(df, 4, 4, out));
-      CHECK_EQ(convert(in, out), want ? Status::ok : Status::not_implemented);
+      CHECK_EQ(convert(in, out), Status::ok);
     }
   }
   Frame in, out;
   REQUIRE_OK(Frame::allocate(PixelFormat::yuv420p, 4, 4, in));
   REQUIRE_OK(Frame::allocate(PixelFormat::rgb24, 6, 4, out));
   CHECK_EQ(convert(in, out), Status::invalid_argument);
+  REQUIRE_OK(Frame::allocate(PixelFormat::gray8, 4, 4, in));
+  REQUIRE_OK(Frame::allocate(PixelFormat::nv12, 4, 4, out));
+  CHECK_EQ(convert(in, out, {}, {1, 4}), Status::invalid_argument);  // dst needs even rows
+}
+
+namespace {
+
+constexpr PixelFormat kRgbSources[] = {PixelFormat::rgb24, PixelFormat::rgba, PixelFormat::bgra};
+constexpr PixelFormat kYuvTargets[] = {PixelFormat::yuv420p, PixelFormat::nv12};
+
+void set_pixel(Frame& f, int x, int y, const Rgb& c) {
+  const int bpp = pixfmt_info(f.format()).bytes_per_pixel[0];
+  std::uint8_t* p = f.plane(0).row(y) + x * bpp;
+  const bool bgr = f.format() == PixelFormat::bgra;
+  p[bgr ? 2 : 0] = static_cast<std::uint8_t>(c.r);
+  p[1] = static_cast<std::uint8_t>(c.g);
+  p[bgr ? 0 : 2] = static_cast<std::uint8_t>(c.b);
+  if (bpp == 4) p[3] = 255;
+}
+
+Frame flat_rgb(PixelFormat fmt, int w, int h, const Rgb& c) {
+  Frame f;
+  REQUIRE_OK(Frame::allocate(fmt, w, h, f));
+  for (int y = 0; y < h; ++y) {
+    for (int x = 0; x < w; ++x) set_pixel(f, x, y, c);
+  }
+  return f;
+}
+
+// Y of pixel (x, y) and the chroma pair of a 4:2:0 frame sample (cx, cy).
+int y_at(const Frame& f, int x, int y) { return f.plane(0).row(y)[x]; }
+
+// Straight-from-the-spec rgb -> yuv (convert.hpp) for the luma of one pixel.
+int ref_luma(const Rgb& p, const RgbToYuvCoeffs& k) {
+  return clamp8((k.yr * p.r + k.yg * p.g + k.yb * p.b + (k.y_offset << 15) + 16384) >> 15);
+}
+
+// Chroma (c = 0 for U, 1 for V) of sample (cx, cy) from 2x2 sums with edge replication.
+int ref_chroma(const Frame& rgb, int c, int cx, int cy, const RgbToYuvCoeffs& k) {
+  int sr = 0, sg = 0, sb = 0;
+  for (int j = 0; j < 2; ++j) {
+    for (int i = 0; i < 2; ++i) {
+      const Rgb p = pixel(rgb, std::min(2 * cx + i, rgb.width() - 1),
+                          std::min(2 * cy + j, rgb.height() - 1));
+      sr += p.r;
+      sg += p.g;
+      sb += p.b;
+    }
+  }
+  const int v = c == 0 ? k.ur * sr + k.ug * sg + k.ub * sb : k.vr * sr + k.vg * sg + k.vb * sb;
+  return clamp8((v + (128 << 17) + 65536) >> 17);
+}
+
+}  // namespace
+
+TEST(rgb_to_yuv_exact_black_white_gray) {
+  for (const PixelFormat src : kRgbSources) {
+    for (const PixelFormat dst : kYuvTargets) {
+      for (const ColorMatrix m : kMatrices) {
+        for (const ColorRange r : kRanges) {
+          const bool lim = r == ColorRange::limited;
+          Frame out;
+          REQUIRE_OK(Frame::allocate(dst, 5, 3, out));
+          const struct {
+            int level, want_y;
+          } cases[] = {{0, lim ? 16 : 0}, {255, lim ? 235 : 255}};
+          for (const auto& c : cases) {
+            REQUIRE_OK(convert(flat_rgb(src, 5, 3, {c.level, c.level, c.level}), out, {m, r}));
+            CHECK_EQ(y_at(out, 4, 2), c.want_y);
+            CHECK_EQ(chroma_at(out, 0, 2, 1), 128);
+            CHECK_EQ(chroma_at(out, 1, 2, 1), 128);
+          }
+          // Every gray maps to U = V = 128 exactly.
+          Frame small;
+          REQUIRE_OK(Frame::allocate(dst, 2, 2, small));
+          for (int g = 0; g < 256; g += 5) {
+            REQUIRE_OK(convert(flat_rgb(src, 2, 2, {g, g, g}), small, {m, r}));
+            CHECK_EQ(chroma_at(small, 0, 0, 0), 128);
+            CHECK_EQ(chroma_at(small, 1, 0, 0), 128);
+          }
+        }
+      }
+    }
+  }
+}
+
+TEST(rgb_to_yuv_primaries_match_double_reference) {
+  const int levels[] = {0, 255};
+  for (const PixelFormat src : kRgbSources) {
+    for (const PixelFormat dst : kYuvTargets) {
+      for (const ColorMatrix m : kMatrices) {
+        for (const ColorRange r : kRanges) {
+          for (const int lr : levels) {
+            for (const int lg : levels) {
+              for (const int lb : levels) {
+                int y, u, v;
+                rgb_to_yuv_double(m, r, {lr, lg, lb}, y, u, v);
+                Frame out;
+                REQUIRE_OK(Frame::allocate(dst, 4, 4, out));
+                REQUIRE_OK(convert(flat_rgb(src, 4, 4, {lr, lg, lb}), out, {m, r}));
+                CHECK(std::abs(y_at(out, 1, 1) - y) <= 1);
+                CHECK(std::abs(chroma_at(out, 0, 1, 1) - u) <= 1);
+                CHECK(std::abs(chroma_at(out, 1, 1, 1) - v) <= 1);
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+TEST(rgb_to_yuv_matches_reference_model) {
+  std::uint64_t seed = 400;
+  for (const PixelFormat src : kRgbSources) {
+    for (const PixelFormat dst : kYuvTargets) {
+      for (const auto& [w, h] : test::test_sizes()) {
+        const Frame in = test::random_frame(src, w, h, ++seed);
+        const ConvertOptions o{ColorMatrix::bt709, ColorRange::limited};
+        const RgbToYuvCoeffs k = rgb_to_yuv_coeffs(o.matrix, o.range);
+        Frame out = test::random_frame(dst, w, h, ++seed);
+        REQUIRE_OK(convert(in, out, o));
+        int bad = 0;
+        for (int y = 0; y < h; ++y) {
+          for (int x = 0; x < w; ++x) bad += y_at(out, x, y) != ref_luma(pixel(in, x, y), k);
+        }
+        for (int cy = 0; cy < (h + 1) / 2; ++cy) {
+          for (int cx = 0; cx < (w + 1) / 2; ++cx) {
+            bad += chroma_at(out, 0, cx, cy) != ref_chroma(in, 0, cx, cy, k);
+            bad += chroma_at(out, 1, cx, cy) != ref_chroma(in, 1, cx, cy, k);
+          }
+        }
+        CHECK_MSG(bad == 0, std::string(pixfmt_name(src)) + " -> " +
+                                std::string(pixfmt_name(dst)) + " " + std::to_string(w) + "x" +
+                                std::to_string(h) + ": " + std::to_string(bad) + " bad samples");
+      }
+    }
+  }
+}
+
+TEST(round_trip_error_bounds) {
+  // 2x2-aligned random color blocks: chroma is exact per block, so the error
+  // is quantization alone (nearest). A smooth ramp bounds bilinear.
+  for (const ColorMatrix m : kMatrices) {
+    for (const ColorRange r : kRanges) {
+      const int bound = r == ColorRange::limited ? 4 : 2;
+      test::Rng rng(11);
+      Frame rgb;
+      REQUIRE_OK(Frame::allocate(PixelFormat::rgb24, 32, 16, rgb));
+      for (int by = 0; by < 8; ++by) {
+        for (int bx = 0; bx < 16; ++bx) {
+          const Rgb c{rng.byte(), rng.byte(), rng.byte()};
+          for (int j = 0; j < 2; ++j) {
+            for (int i = 0; i < 2; ++i) set_pixel(rgb, 2 * bx + i, 2 * by + j, c);
+          }
+        }
+      }
+      Frame ramp;
+      REQUIRE_OK(Frame::allocate(PixelFormat::rgb24, 64, 32, ramp));
+      for (int y = 0; y < 32; ++y) {
+        for (int x = 0; x < 64; ++x) set_pixel(ramp, x, y, {60 + x * 2, 200 - y * 3, 40 + x + y});
+      }
+      for (const PixelFormat mid : kYuvTargets) {
+        for (const ChromaMode mode : kChromaModes) {
+          const Frame& img = mode == ChromaMode::nearest ? rgb : ramp;
+          Frame yuv, back;
+          REQUIRE_OK(Frame::allocate(mid, img.width(), img.height(), yuv));
+          REQUIRE_OK(Frame::allocate(PixelFormat::rgb24, img.width(), img.height(), back));
+          REQUIRE_OK(convert(img, yuv, {m, r, mode}));
+          REQUIRE_OK(convert(yuv, back, {m, r, mode}));
+          int worst = 0;
+          for (int y = 0; y < img.height(); ++y) {
+            for (int x = 0; x < img.width(); ++x) {
+              const Rgb a = pixel(img, x, y), b = pixel(back, x, y);
+              worst = std::max({worst, std::abs(a.r - b.r), std::abs(a.g - b.g), std::abs(a.b - b.b)});
+            }
+          }
+          CHECK_MSG(worst <= (mode == ChromaMode::nearest ? bound : bound + 2),
+                    std::string(mode == ChromaMode::nearest ? "nearest" : "bilinear") + " round trip error " + std::to_string(worst));
+        }
+      }
+    }
+  }
+}
+
+TEST(swizzle_gray_and_copy_paths) {
+  const Frame rgb = test::random_frame(PixelFormat::rgb24, 19, 7, 21);
+  const Frame rgba = test::random_frame(PixelFormat::rgba, 19, 7, 22);
+  Frame bgra, back, rgb_back;
+  REQUIRE_OK(Frame::allocate(PixelFormat::bgra, 19, 7, bgra));
+  REQUIRE_OK(Frame::allocate(PixelFormat::rgba, 19, 7, back));
+  REQUIRE_OK(Frame::allocate(PixelFormat::rgb24, 19, 7, rgb_back));
+  REQUIRE_OK(convert(rgba, bgra));
+  REQUIRE_OK(convert(bgra, back));
+  CHECK_MSG(test::first_difference(rgba, back).empty(), test::first_difference(rgba, back));
+  REQUIRE_OK(convert(rgba, rgb_back));
+  REQUIRE_OK(convert(rgb, back));
+  for (int y = 0; y < 7; ++y) {
+    for (int x = 0; x < 19; ++x) {
+      const Rgb a = pixel(rgba, x, y), b = pixel(rgb_back, x, y), c = pixel(back, x, y),
+                d = pixel(rgb, x, y);
+      CHECK(a.r == b.r && a.g == b.g && a.b == b.b);
+      CHECK(c.r == d.r && c.g == d.g && c.b == d.b && back.plane(0).row(y)[x * 4 + 3] == 255);
+    }
+  }
+  // gray8 <-> packed and yuv.
+  const Frame gray = test::random_frame(PixelFormat::gray8, 19, 7, 23);
+  for (const PixelFormat p : kRgbTargets) {
+    Frame out, g2;
+    REQUIRE_OK(Frame::allocate(p, 19, 7, out));
+    REQUIRE_OK(Frame::allocate(PixelFormat::gray8, 19, 7, g2));
+    REQUIRE_OK(convert(gray, out));
+    for (int x = 0; x < 19; ++x) {
+      const Rgb c = pixel(out, x, 3);
+      CHECK(c.r == gray.plane(0).row(3)[x] && c.g == c.r && c.b == c.r);
+    }
+    REQUIRE_OK(convert(out, g2, {ColorMatrix::bt709, ColorRange::limited}));
+    CHECK_MSG(test::first_difference(gray, g2).empty(), test::first_difference(gray, g2));
+  }
+  for (const PixelFormat p : kYuvTargets) {
+    Frame out, g2;
+    REQUIRE_OK(Frame::allocate(p, 19, 7, out));
+    REQUIRE_OK(Frame::allocate(PixelFormat::gray8, 19, 7, g2));
+    REQUIRE_OK(convert(gray, out));
+    CHECK_EQ(chroma_at(out, 0, 9, 3), 128);
+    CHECK_EQ(chroma_at(out, 1, 0, 0), 128);
+    REQUIRE_OK(convert(out, g2));
+    CHECK_MSG(test::first_difference(gray, g2).empty(), test::first_difference(gray, g2));
+  }
+  // yuv420p <-> nv12 round trip is exact, and same-format is a copy.
+  const Frame i420 = test::random_frame(PixelFormat::yuv420p, 19, 7, 24);
+  Frame nv, i420b, copy;
+  REQUIRE_OK(Frame::allocate(PixelFormat::nv12, 19, 7, nv));
+  REQUIRE_OK(Frame::allocate(PixelFormat::yuv420p, 19, 7, i420b));
+  REQUIRE_OK(convert(i420, nv));
+  CHECK_EQ(int(nv.plane(1).row(2)[7 * 2]), int(i420.plane(1).row(2)[7]));
+  CHECK_EQ(int(nv.plane(1).row(2)[7 * 2 + 1]), int(i420.plane(2).row(2)[7]));
+  REQUIRE_OK(convert(nv, i420b));
+  CHECK_MSG(test::first_difference(i420, i420b).empty(), test::first_difference(i420, i420b));
+  REQUIRE_OK(Frame::allocate(PixelFormat::yuv420p, 19, 7, copy));
+  REQUIRE_OK(convert(i420, copy));
+  CHECK_MSG(test::first_difference(i420, copy).empty(), test::first_difference(i420, copy));
+}
+
+TEST(every_pair_row_ranges_and_isas_match) {
+  for (int s = 0; s < kPixelFormatCount; ++s) {
+    for (int d = 0; d < kPixelFormatCount; ++d) {
+      const auto sf = static_cast<PixelFormat>(s), df = static_cast<PixelFormat>(d);
+      for (const auto& [w, h] : test::test_sizes()) {
+        const Frame in = test::random_frame(sf, w, h, 900 + s * 7 + d + w);
+        const ConvertOptions o{ColorMatrix::bt601, ColorRange::limited};
+        CHECK_ALL_ISAS_MATCH([&] { return test::random_frame(df, w, h, 3); },
+                             [&](Frame& out) { return convert(in, out, o); });
+        if (h < 4) continue;
+        Frame whole = test::random_frame(df, w, h, 4), parts = test::random_frame(df, w, h, 5);
+        REQUIRE_OK(convert(in, whole, o));
+        REQUIRE_OK(convert(in, parts, o, {0, 2}));
+        REQUIRE_OK(convert(in, parts, o, {2, h}));
+        const std::string diff = test::first_difference(whole, parts);
+        CHECK_MSG(diff.empty(), std::string(pixfmt_name(sf)) + " -> " +
+                                    std::string(pixfmt_name(df)) + " " + std::to_string(w) + "x" +
+                                    std::to_string(h) + ": " + diff);
+      }
+    }
+  }
 }
