@@ -102,6 +102,44 @@ void h1_taps(const std::uint8_t* src, std::int16_t* mid, int n, const FilterView
   }
 }
 
+// 1 channel, 2..6 taps, eight outputs per block from the FilterView block
+// tables. The 32 byte source window is two vectors; pshufb zeroes lanes whose
+// index byte has the top bit set, so each half is looked up with the other
+// half's indices masked out and the results are or-ed. Each lookup yields two
+// taps of all eight outputs; interleaving them against the matching weight
+// pair gives the pmaddwd layout (tap 2m, tap 2m + 1). An odd last tap meets a
+// zero weight. Outputs past the table blocks go to the gather kernels.
+template <int T>
+void h1_tbl(const std::uint8_t* src, std::int16_t* mid, const FilterView& f) {
+  const std::uint8_t* ti = f.tbl;
+  const std::int16_t* wt = f.wt;
+  const __m128i c15 = _mm_set1_epi8(15), c16 = _mm_set1_epi8(16);
+  for (int b = 0; b < f.tbl_blocks; ++b) {
+    const std::uint8_t* s = src + f.start[b * 8];
+    const __m128i lo_win = _mm_loadu_si128(reinterpret_cast<const __m128i*>(s));
+    const __m128i hi_win = _mm_loadu_si128(reinterpret_cast<const __m128i*>(s + 16));
+    __m256i acc = _mm256_setzero_si256();
+    for (int p = 0; p < (T + 1) / 2; ++p) {
+      const __m128i idx = _mm_loadu_si128(reinterpret_cast<const __m128i*>(ti));
+      ti += 16;
+      const __m128i g = _mm_or_si128(
+          _mm_shuffle_epi8(lo_win, _mm_or_si128(idx, _mm_cmpgt_epi8(idx, c15))),
+          _mm_shuffle_epi8(hi_win, _mm_sub_epi8(idx, c16)));
+      const __m128i il = _mm_unpacklo_epi8(g, _mm_srli_si128(g, 8));
+      const __m128i w0 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(wt));
+      const __m128i w1 = 2 * p + 1 < T
+                             ? _mm_loadu_si128(reinterpret_cast<const __m128i*>(wt + 8))
+                             : _mm_setzero_si128();
+      wt += 2 * p + 1 < T ? 16 : 8;
+      acc = _mm256_add_epi32(
+          acc, _mm256_madd_epi16(_mm256_cvtepu8_epi16(il),
+                                 _mm256_set_m128i(_mm_unpackhi_epi16(w0, w1),
+                                                  _mm_unpacklo_epi16(w0, w1))));
+    }
+    _mm_storeu_si128(reinterpret_cast<__m128i*>(mid + b * 8), hround_pack(acc));
+  }
+}
+
 // Interleaved channels (C = 2..4), taps >= 2: two outputs per step, one in
 // each 128 bit lane, two taps at a time. Per lane, an 8 byte load holds both
 // pixels (2C <= 8); shifting by C bytes and interleaving gives
@@ -150,6 +188,20 @@ void h_copy(const std::uint8_t* src, std::int16_t* mid, int n, const FilterView&
 }
 
 void hscale1(const std::uint8_t* src, std::int16_t* mid, int n, const FilterView& f) {
+  if (f.tbl_blocks > 0) {
+    switch (f.taps) {
+      case 2: h1_tbl<2>(src, mid, f); break;
+      case 3: h1_tbl<3>(src, mid, f); break;
+      case 4: h1_tbl<4>(src, mid, f); break;
+      case 5: h1_tbl<5>(src, mid, f); break;
+      default: h1_tbl<6>(src, mid, f); break;
+    }
+    const int done = f.tbl_blocks * 8;
+    if (done == n) return;
+    const FilterView rest{f.taps, f.stride, f.start + done,
+                          f.weights + static_cast<std::ptrdiff_t>(done) * f.stride};
+    return hscale1(src, mid + done, n - done, rest);
+  }
   if (f.taps == 1) return h_copy<1>(src, mid, n, f);
   if (f.taps == 2) return h1_t2(src, mid, n, f);
   h1_taps(src, mid, n, f);

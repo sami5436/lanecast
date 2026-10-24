@@ -102,6 +102,39 @@ void h1_taps(const std::uint8_t* src, std::int16_t* mid, int n, const FilterView
   h1_groups<0>(src, mid, n, f);
 }
 
+// 1 channel, 2..6 taps, eight outputs per block from the FilterView block
+// tables: two 16 byte loads cover the block's source window, one table lookup
+// yields two taps of all eight outputs, and tap-major weights make each
+// accumulate a plain vector multiply-add. Outputs past the table blocks go to
+// the gather kernels.
+template <int T>
+void h1_tbl(const std::uint8_t* src, std::int16_t* mid, const FilterView& f) {
+  const std::uint8_t* ti = f.tbl;
+  const std::int16_t* wt = f.wt;
+  for (int b = 0; b < f.tbl_blocks; ++b) {
+    const std::uint8_t* s = src + f.start[b * 8];
+    const uint8x16x2_t window = {{vld1q_u8(s), vld1q_u8(s + 16)}};
+    int32x4_t lo = vdupq_n_s32(0), hi = lo;
+    for (int p = 0; p < (T + 1) / 2; ++p) {
+      const uint8x16_t g = vqtbl2q_u8(window, vld1q_u8(ti));
+      ti += 16;
+      const int16x8_t v0 = vreinterpretq_s16_u16(vmovl_u8(vget_low_u8(g)));
+      const int16x8_t w0 = vld1q_s16(wt);
+      wt += 8;
+      lo = vmlal_s16(lo, vget_low_s16(v0), vget_low_s16(w0));
+      hi = vmlal_high_s16(hi, v0, w0);
+      if (2 * p + 1 < T) {
+        const int16x8_t v1 = vreinterpretq_s16_u16(vmovl_high_u8(g));
+        const int16x8_t w1 = vld1q_s16(wt);
+        wt += 8;
+        lo = vmlal_s16(lo, vget_low_s16(v1), vget_low_s16(w1));
+        hi = vmlal_high_s16(hi, v1, w1);
+      }
+    }
+    vst1q_s16(mid + b * 8, vcombine_s16(vrshrn_n_s32(lo, 7), vrshrn_n_s32(hi, 7)));
+  }
+}
+
 // Interleaved channels (C = 2..4), any taps: each tap loads one pixel as 4
 // bytes and accumulates it per channel lane. Extra lanes are overwritten by
 // the next output or land in the row padding.
@@ -145,6 +178,20 @@ void h3_t2(const std::uint8_t* src, std::int16_t* mid, int n, const FilterView& 
 }
 
 void hscale1(const std::uint8_t* src, std::int16_t* mid, int n, const FilterView& f) {
+  if (f.tbl_blocks > 0) {
+    switch (f.taps) {
+      case 2: h1_tbl<2>(src, mid, f); break;
+      case 3: h1_tbl<3>(src, mid, f); break;
+      case 4: h1_tbl<4>(src, mid, f); break;
+      case 5: h1_tbl<5>(src, mid, f); break;
+      default: h1_tbl<6>(src, mid, f); break;
+    }
+    const int done = f.tbl_blocks * 8;
+    if (done == n) return;
+    const FilterView rest{f.taps, f.stride, f.start + done,
+                          f.weights + static_cast<std::ptrdiff_t>(done) * f.stride};
+    return hscale1(src, mid + done, n - done, rest);
+  }
   if (f.taps == 2) return h1_t2(src, mid, n, f);
   if (f.taps == 1) {  // 1 pixel wide source: mid = src * 128
     for (int x = 0; x < n; ++x) mid[x] = static_cast<std::int16_t>(src[f.start[x]] << 7);
@@ -175,8 +222,39 @@ inline uint8x16_t pack16(int32x4_t a0, int32x4_t a1, int32x4_t a2, int32x4_t a3)
                      vqmovn_u16(vcombine_u16(round_narrow(a2), round_narrow(a3))));
 }
 
+// Fixed tap count: row pointers and weights stay in registers and the tap loop
+// unrolls, 16 samples per step.
+template <int T>
+void vscale_t(const std::int16_t* const* rows, const std::int16_t* w, std::uint8_t* dst,
+              int count) {
+  const std::int16_t* r[T];
+  std::int16_t wk[T];
+  for (int k = 0; k < T; ++k) {
+    r[k] = rows[k];
+    wk[k] = w[k];
+  }
+  for (int i = 0; i < count; i += 16) {
+    int32x4_t c0 = vdupq_n_s32(0), c1 = c0, c2 = c0, c3 = c0;
+    for (int k = 0; k < T; ++k) {
+      const int16x8_t a = vld1q_s16(r[k] + i), b = vld1q_s16(r[k] + i + 8);
+      c0 = vmlal_n_s16(c0, vget_low_s16(a), wk[k]);
+      c1 = vmlal_high_n_s16(c1, a, wk[k]);
+      c2 = vmlal_n_s16(c2, vget_low_s16(b), wk[k]);
+      c3 = vmlal_high_n_s16(c3, b, wk[k]);
+    }
+    vst1q_u8(dst + i, pack16(c0, c1, c2, c3));
+  }
+}
+
 void vscale(const std::int16_t* const* rows, const std::int16_t* w, int taps, std::uint8_t* dst,
             int count) {
+  switch (taps) {
+    case 3: return vscale_t<3>(rows, w, dst, count);
+    case 4: return vscale_t<4>(rows, w, dst, count);
+    case 5: return vscale_t<5>(rows, w, dst, count);
+    case 6: return vscale_t<6>(rows, w, dst, count);
+    default: break;
+  }
   if (taps == 2) {
     const std::int16_t* r0 = rows[0];
     const std::int16_t* r1 = rows[1];
