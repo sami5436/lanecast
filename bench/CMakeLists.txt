@@ -6,11 +6,12 @@ target_include_directories(lanecast_bench PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 
 # Head-to-head against libswscale / libavfilter linked directly. Optional:
 # never required by the core build or CI. AUTO enables it when pkg-config
-# finds libswscale and libavutil; libavfilter adds the filter and metric ops.
+# finds libswscale 9 or newer (FFmpeg 8: SwsContext fields are public) and
+# libavutil; libavfilter adds the filter and metric ops.
 if(NOT LANECAST_BENCH_FFMPEG STREQUAL "OFF")
   find_package(PkgConfig QUIET)
   if(PkgConfig_FOUND)
-    pkg_check_modules(LANECAST_SWS QUIET IMPORTED_TARGET libswscale libavutil)
+    pkg_check_modules(LANECAST_SWS QUIET IMPORTED_TARGET libswscale>=9 libavutil)
     pkg_check_modules(LANECAST_AVF QUIET IMPORTED_TARGET libavfilter)
   endif()
   if(LANECAST_SWS_FOUND)
