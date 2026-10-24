@@ -4,7 +4,7 @@
 //   yuv420p, nv12          -> rgb24, rgba, bgra   (YUV to RGB, below)
 //   rgb24, rgba, bgra      -> yuv420p, nv12       (RGB to YUV, below)
 //   yuv420p <-> nv12                              (chroma (de)interleave, exact)
-//   rgb24, rgba, bgra      -> rgb24, rgba, bgra   (swizzle; added alpha = 255)
+//   rgb24, rgba, bgra      -> rgb24, rgba, bgra   (swizzle; alpha kept, added alpha = 255)
 //   gray8 -> yuv420p, nv12 (Y copied, U = V = 128)
 //   yuv420p, nv12 -> gray8 (Y copied, no range change)
 //   gray8 -> rgb24, rgba, bgra (R = G = B = Y, no range change)
