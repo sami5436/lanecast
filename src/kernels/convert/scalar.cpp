@@ -236,6 +236,8 @@ void fill_scalar(Table& t) {
   t.nv12_bilinear_to_packed[kRgba] = &nv12_bilinear_row<kRgba>;
   t.nv12_bilinear_to_packed[kBgra] = &nv12_bilinear_row<kBgra>;
 
+  fill_scalar_fast(t);
+
   t.packed_to_yuv420[kRgb24] = &packed_to_yuv420_row<kRgb24>;
   t.packed_to_yuv420[kRgba] = &packed_to_yuv420_row<kRgba>;
   t.packed_to_yuv420[kBgra] = &packed_to_yuv420_row<kBgra>;

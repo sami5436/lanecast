@@ -32,6 +32,7 @@ Status yuv_to_packed(const Frame& src, Frame& dst, const ConvertOptions& opts, R
   const YuvToRgbCoeffs c = yuv_to_rgb_coeffs(opts.matrix, opts.range);
   const bool nv12 = src.format() == PixelFormat::nv12;
   const bool bilinear = opts.chroma == ChromaMode::bilinear;
+  const bool fast = !bilinear && opts.precision == Precision::fast;
   const Plane py = src.plane(0), pu = src.plane(1), pd = dst.plane(0);
   const Plane pv = nv12 ? src.plane(1) : src.plane(2);
   const int w = src.width(), ch = pu.height;
@@ -45,7 +46,7 @@ Status yuv_to_packed(const Frame& src, Frame& dst, const ConvertOptions& opts, R
         if (fn == nullptr) return Status::not_implemented;
         fn(py.row(y), pu.row(cy), pu.row(cyn), pd.row(y), w, c, opts.chroma_loc);
       } else {
-        const auto fn = t.nv12_to_packed[packed];
+        const auto fn = fast ? t.nv12_fast_to_packed[packed] : t.nv12_to_packed[packed];
         if (fn == nullptr) return Status::not_implemented;
         fn(py.row(y), pu.row(cy), pd.row(y), w, c);
       }
@@ -55,7 +56,7 @@ Status yuv_to_packed(const Frame& src, Frame& dst, const ConvertOptions& opts, R
       fn(py.row(y), pu.row(cy), pu.row(cyn), pv.row(cy), pv.row(cyn), pd.row(y), w, c,
          opts.chroma_loc);
     } else {
-      const auto fn = t.yuv420_to_packed[packed];
+      const auto fn = fast ? t.yuv420_fast_to_packed[packed] : t.yuv420_to_packed[packed];
       if (fn == nullptr) return Status::not_implemented;
       fn(py.row(y), pu.row(cy), pv.row(cy), pd.row(y), w, c);
     }

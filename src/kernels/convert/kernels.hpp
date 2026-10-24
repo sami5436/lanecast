@@ -66,6 +66,9 @@ using GrayToPackedRowFn = void (*)(const std::uint8_t* gray, std::uint8_t* dst, 
 struct Table {
   Yuv420ToPackedRowFn yuv420_to_packed[kPackedCount] = {};
   Nv12ToPackedRowFn nv12_to_packed[kPackedCount] = {};
+  // Nearest chroma with Precision::fast (contract in convert.hpp).
+  Yuv420ToPackedRowFn yuv420_fast_to_packed[kPackedCount] = {};
+  Nv12ToPackedRowFn nv12_fast_to_packed[kPackedCount] = {};
   Yuv420BilinearToPackedRowFn yuv420_bilinear_to_packed[kPackedCount] = {};
   Nv12BilinearToPackedRowFn nv12_bilinear_to_packed[kPackedCount] = {};
   PackedToYuv420RowFn packed_to_yuv420[kPackedCount] = {};
@@ -78,6 +81,7 @@ struct Table {
 };
 
 void fill_scalar(Table& t);
+void fill_scalar_fast(Table& t);  // called by fill_scalar
 void fill_neon(Table& t);
 // Called by fill_neon; split into their own TUs to keep files small.
 void fill_neon_yuv2rgb(Table& t);
