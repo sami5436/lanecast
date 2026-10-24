@@ -146,7 +146,8 @@ Status build_scale(const FilterSpec& f, const VideoInfo& cur, std::unique_ptr<St
   if (w == cur.width && h == cur.height) return Status::ok;  // no-op, no stage
 
   auto st = std::make_unique<ScaleStage>();
-  if (const Status s = Scaler::create(cur.format, cur.width, cur.height, w, h, filter, st->scaler);
+  if (const Status s = Scaler::create(cur.format, cur.width, cur.height, w, h, filter, st->scaler,
+                                      cur.chroma_loc);
       s != Status::ok) {
     return fail(error, "scale: cannot scale " + std::string(pixfmt_name(cur.format)) + " " +
                            std::to_string(cur.width) + "x" + std::to_string(cur.height) +

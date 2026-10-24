@@ -266,7 +266,7 @@ TEST(PipelineMatchesDirectOps) {
   Frame in = test::random_frame(PixelFormat::yuv420p, 67, 45, 11);
   Frame scaled;
   REQUIRE_OK(Frame::allocate(PixelFormat::yuv420p, 33, 20, scaled));
-  REQUIRE_OK(scale(in, scaled, ScaleFilter::area));
+  REQUIRE_OK(scale(in, scaled, ScaleFilter::area, {}, ChromaLocation::left));
   Frame expected;
   REQUIRE_OK(Frame::allocate(PixelFormat::rgb24, 33, 20, expected));
   ConvertOptions co;

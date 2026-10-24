@@ -55,29 +55,51 @@ void h1_t2(const std::uint8_t* src, std::int16_t* mid, int n, const FilterView& 
   }
 }
 
-// 1 channel, taps >= 3: widening multiply-add along the taps, 8 then 4 at a
-// time (weight rows are zero padded to a multiple of 4).
-void h1_taps(const std::uint8_t* src, std::int16_t* mid, int n, const FilterView& f) {
-  const int stride = f.stride;
-  for (int x = 0; x < n; ++x) {
-    const std::uint8_t* s = src + f.start[x];
-    const std::int16_t* w = f.weights + static_cast<std::ptrdiff_t>(x) * stride;
-    int32x4_t acc = vdupq_n_s32(0);
-    int k = 0;
-    for (; k + 8 <= stride; k += 8) {
-      const int16x8_t v = vreinterpretq_s16_u16(vmovl_u8(vld1_u8(s + k)));
-      const int16x8_t wk = vld1q_s16(w + k);
-      acc = vmlal_s16(acc, vget_low_s16(v), vget_low_s16(wk));
-      acc = vmlal_high_s16(acc, v, wk);
+// 1 channel, taps >= 3, four outputs per step. Per group of four taps, a
+// u32 lane load gathers each output's four source bytes; widened and
+// multiplied against that output's weights they accumulate into one s32x4 per
+// output, so the groups of any tap count add up without leaving the vector
+// domain. Two levels of pairwise adds then reduce the four accumulators to one
+// sum per output. G > 0 fixes the group count at compile time (taps <= 4G).
+// Rows are padded to a multiple of four weights; the last block may run past
+// n by reusing the last output, its extra lanes land in the row padding.
+template <int G>
+void h1_groups(const std::uint8_t* src, std::int16_t* mid, int n, const FilterView& f) {
+  const int groups = G ? G : f.stride / 4;
+  for (int x = 0; x < n; x += 4) {
+    const std::uint8_t* s[4];
+    const std::int16_t* w[4];
+    for (int j = 0; j < 4; ++j) {
+      const int xj = x + j < n ? x + j : n - 1;
+      s[j] = src + f.start[xj];
+      w[j] = f.weights + static_cast<std::ptrdiff_t>(xj) * f.stride;
     }
-    if (k < stride) {
-      const int16x4_t v = vreinterpret_s16_u16(
-          vget_low_u16(vmovl_u8(vreinterpret_u8_u32(vld1_dup_u32(
-              reinterpret_cast<const std::uint32_t*>(s + k))))));
-      acc = vmlal_s16(acc, v, vld1_s16(w + k));
+    int32x4_t acc0 = vdupq_n_s32(0), acc1 = acc0, acc2 = acc0, acc3 = acc0;
+    for (int g = 0; g < groups; ++g) {
+      uint32x4_t b = vdupq_n_u32(0);
+      b = vld1q_lane_u32(reinterpret_cast<const std::uint32_t*>(s[0] + 4 * g), b, 0);
+      b = vld1q_lane_u32(reinterpret_cast<const std::uint32_t*>(s[1] + 4 * g), b, 1);
+      b = vld1q_lane_u32(reinterpret_cast<const std::uint32_t*>(s[2] + 4 * g), b, 2);
+      b = vld1q_lane_u32(reinterpret_cast<const std::uint32_t*>(s[3] + 4 * g), b, 3);
+      const uint8x16_t bytes = vreinterpretq_u8_u32(b);
+      const int16x8_t v01 = vreinterpretq_s16_u16(vmovl_u8(vget_low_u8(bytes)));
+      const int16x8_t v23 = vreinterpretq_s16_u16(vmovl_high_u8(bytes));
+      const int16x8_t w01 = vcombine_s16(vld1_s16(w[0] + 4 * g), vld1_s16(w[1] + 4 * g));
+      const int16x8_t w23 = vcombine_s16(vld1_s16(w[2] + 4 * g), vld1_s16(w[3] + 4 * g));
+      acc0 = vmlal_s16(acc0, vget_low_s16(v01), vget_low_s16(w01));
+      acc1 = vmlal_high_s16(acc1, v01, w01);
+      acc2 = vmlal_s16(acc2, vget_low_s16(v23), vget_low_s16(w23));
+      acc3 = vmlal_high_s16(acc3, v23, w23);
     }
-    mid[x] = static_cast<std::int16_t>((vaddvq_s32(acc) + 64) >> 7);
+    const int32x4_t sums = vpaddq_s32(vpaddq_s32(acc0, acc1), vpaddq_s32(acc2, acc3));
+    vst1_s16(mid + x, vrshrn_n_s32(sums, 7));
   }
+}
+
+void h1_taps(const std::uint8_t* src, std::int16_t* mid, int n, const FilterView& f) {
+  if (f.stride == 4) return h1_groups<1>(src, mid, n, f);
+  if (f.stride == 8) return h1_groups<2>(src, mid, n, f);
+  h1_groups<0>(src, mid, n, f);
 }
 
 // Interleaved channels (C = 2..4), any taps: each tap loads one pixel as 4

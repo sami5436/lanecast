@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <memory>
 #include <tuple>
 
@@ -17,9 +18,9 @@ namespace {
 
 const ScaleFilter kFilters[] = {ScaleFilter::bilinear, ScaleFilter::area};
 
-void check_table(ScaleFilter filter, int src, int dst) {
+void check_table(ScaleFilter filter, int src, int dst, int pos = 128) {
   ScaleFilterTable t;
-  REQUIRE_OK(build_scale_filter(filter, src, dst, t));
+  REQUIRE_OK(build_scale_filter(filter, src, dst, t, pos, pos));
   CHECK(t.taps >= 1 && t.taps <= src);
   CHECK_EQ(t.start.size(), static_cast<std::size_t>(dst));
   CHECK_EQ(t.weights.size(), static_cast<std::size_t>(dst) * static_cast<std::size_t>(t.taps));
@@ -42,7 +43,11 @@ void check_table(ScaleFilter filter, int src, int dst) {
 TEST(filter_invariants) {
   for (const ScaleFilter f : kFilters) {
     for (int src : {1, 2, 3, 4, 5, 7, 16, 17, 31, 100, 720, 1080, 1920, 3840}) {
-      for (int dst : {1, 2, 3, 4, 5, 6, 9, 16, 33, 64, 540, 1280, 1920}) check_table(f, src, dst);
+      for (int dst : {1, 2, 3, 4, 5, 6, 9, 16, 33, 64, 540, 1280, 1920}) {
+        check_table(f, src, dst);
+        check_table(f, src, dst, 64);
+        check_table(f, src, dst, 0);
+      }
     }
     check_table(f, 4096, 3);
     check_table(f, 3, 4096);
@@ -60,37 +65,67 @@ TEST(filter_rejects_bad_sizes) {
 
 TEST(filter_known_values) {
   ScaleFilterTable t;
-  // 2x down: both filters average pairs.
-  for (const ScaleFilter f : kFilters) {
-    REQUIRE_OK(build_scale_filter(f, 4, 2, t));
-    CHECK_EQ(t.taps, 2);
-    CHECK_EQ(t.start[0], 0);
-    CHECK_EQ(t.start[1], 2);
-    for (const std::int16_t w : t.weights) CHECK_EQ(static_cast<int>(w), 8192);
-  }
+  const auto weights = [&](int o, int k) {
+    return static_cast<int>(t.weights[static_cast<std::size_t>(o * t.taps + k)]);
+  };
+  // Area 2x down averages pairs.
+  REQUIRE_OK(build_scale_filter(ScaleFilter::area, 4, 2, t));
+  CHECK_EQ(t.taps, 2);
+  CHECK_EQ(t.start[0], 0);
+  CHECK_EQ(t.start[1], 2);
+  for (const std::int16_t w : t.weights) CHECK_EQ(static_cast<int>(w), 8192);
+  // Bilinear 2x down widens the triangle to 4 taps: interior rows are 1 3 3 1 over 8.
+  REQUIRE_OK(build_scale_filter(ScaleFilter::bilinear, 8, 4, t));
+  CHECK_EQ(t.taps, 4);
+  CHECK_EQ(t.start[1], 1);
+  const int interior[4] = {2048, 6144, 6144, 2048};
+  for (int k = 0; k < 4; ++k) CHECK_EQ(weights(1, k), interior[k]);
+  // The same filter with the sample sited a quarter pixel left (pos 64).
+  REQUIRE_OK(build_scale_filter(ScaleFilter::bilinear, 8, 4, t, 64, 64));
+  CHECK_EQ(t.start[1], 1);
+  const int left[4] = {3072, 7168, 5120, 1024};
+  for (int k = 0; k < 4; ++k) CHECK_EQ(weights(1, k), left[k]);
   // Bilinear 2 -> 4: edges clamp, interior quarter positions.
   REQUIRE_OK(build_scale_filter(ScaleFilter::bilinear, 2, 4, t));
-  const std::int16_t expect[8] = {16384, 0, 12288, 4096, 4096, 12288, 0, 16384};
-  for (int i = 0; i < 8; ++i) CHECK_EQ(static_cast<int>(t.weights[static_cast<std::size_t>(i)]), static_cast<int>(expect[i]));
-  // Identity is (16384, 0) at every position (last one starts one earlier).
+  const int expect[8] = {16384, 0, 12288, 4096, 4096, 12288, 0, 16384};
+  for (int i = 0; i < 8; ++i) CHECK_EQ(weights(i / 2, i % 2), expect[i]);
+  // Identity is one tap of full weight at every position.
   REQUIRE_OK(build_scale_filter(ScaleFilter::bilinear, 5, 5, t));
-  for (int o = 0; o < 4; ++o) {
+  CHECK_EQ(t.taps, 1);
+  for (int o = 0; o < 5; ++o) {
     CHECK_EQ(t.start[static_cast<std::size_t>(o)], o);
-    CHECK_EQ(static_cast<int>(t.weights[static_cast<std::size_t>(o * 2)]), 16384);
+    CHECK_EQ(weights(o, 0), 16384);
   }
-  CHECK_EQ(t.start[4], 3);
-  CHECK_EQ(static_cast<int>(t.weights[9]), 16384);
   // Area 3 -> 2: output 0 covers 1 and half of source 1 (largest takes the remainder).
   REQUIRE_OK(build_scale_filter(ScaleFilter::area, 3, 2, t));
   CHECK_EQ(t.taps, 2);
-  CHECK_EQ(static_cast<int>(t.weights[0]), 10923);
-  CHECK_EQ(static_cast<int>(t.weights[1]), 5461);
-  CHECK_EQ(static_cast<int>(t.weights[2]), 5461);
-  CHECK_EQ(static_cast<int>(t.weights[3]), 10923);
+  CHECK_EQ(weights(0, 0), 10923);
+  CHECK_EQ(weights(0, 1), 5461);
+  CHECK_EQ(weights(1, 0), 5461);
+  CHECK_EQ(weights(1, 1), 10923);
   // 1-pixel source: one tap of full weight.
   REQUIRE_OK(build_scale_filter(ScaleFilter::bilinear, 1, 5, t));
   CHECK_EQ(t.taps, 1);
   for (const std::int16_t w : t.weights) CHECK_EQ(static_cast<int>(w), 16384);
+}
+
+TEST(filter_rejects_bad_positions) {
+  ScaleFilterTable t;
+  CHECK(build_scale_filter(ScaleFilter::bilinear, 8, 4, t, -1, 128) == Status::invalid_argument);
+  CHECK(build_scale_filter(ScaleFilter::bilinear, 8, 4, t, 128, 257) == Status::invalid_argument);
+}
+
+TEST(filter_widens_with_ratio) {
+  // Downscaling support grows with the ratio, so taps cover at least the ratio.
+  ScaleFilterTable t;
+  for (const int ratio : {2, 3, 4, 6}) {
+    REQUIRE_OK(build_scale_filter(ScaleFilter::bilinear, 64 * ratio, 64, t));
+    CHECK_MSG(t.taps >= 2 * ratio - 1, "taps for " + std::to_string(ratio) + "x");
+    REQUIRE_OK(build_scale_filter(ScaleFilter::area, 64 * ratio, 64, t));
+    CHECK_EQ(t.taps, ratio);
+  }
+  REQUIRE_OK(build_scale_filter(ScaleFilter::bilinear, 64, 128, t));
+  CHECK_EQ(t.taps, 2);
 }
 
 namespace {
@@ -191,16 +226,18 @@ TEST(extreme_ratios) {
 }
 
 TEST(known_values) {
-  // 2x down averages 2x2 blocks.
+  // Area 2x down averages 2x2 blocks.
   Frame src = make_frame(PixelFormat::gray8, 4, 2);
   const std::uint8_t px[2][4] = {{10, 20, 30, 40}, {50, 60, 70, 80}};
   for (int y = 0; y < 2; ++y) std::memcpy(src.plane(0).row(y), px[y], 4);
-  for (const ScaleFilter f : kFilters) {
-    Frame dst = make_frame(PixelFormat::gray8, 2, 1);
-    REQUIRE_OK(scale(src, dst, f));
-    CHECK_EQ(static_cast<int>(dst.plane(0).row(0)[0]), 35);
-    CHECK_EQ(static_cast<int>(dst.plane(0).row(0)[1]), 55);
-  }
+  Frame dst = make_frame(PixelFormat::gray8, 2, 1);
+  REQUIRE_OK(scale(src, dst, ScaleFilter::area));
+  CHECK_EQ(static_cast<int>(dst.plane(0).row(0)[0]), 35);
+  CHECK_EQ(static_cast<int>(dst.plane(0).row(0)[1]), 55);
+  // Bilinear weights the left edge pixel more (taps beyond the edge fold in).
+  REQUIRE_OK(scale(src, dst, ScaleFilter::bilinear));
+  CHECK_EQ(static_cast<int>(dst.plane(0).row(0)[0]), 37);
+  CHECK_EQ(static_cast<int>(dst.plane(0).row(0)[1]), 54);
   // Bilinear 2x up of [0, 255]: edges hold, interior at quarter weights.
   Frame two = make_frame(PixelFormat::gray8, 2, 1);
   two.plane(0).row(0)[0] = 0;
@@ -286,6 +323,43 @@ TEST(rejects_bad_arguments) {
   CHECK(sc->run(src, ok) == Status::ok);
 }
 
+TEST(downscale_averages_stripes) {
+  // One-pixel stripes: a widened filter lands near the mean at any ratio,
+  // a fixed 2-tap filter would return 0 or 255.
+  for (const int ratio : {2, 3, 4, 5}) {
+    const int dn = 24;
+    Frame src = make_frame(PixelFormat::gray8, dn * ratio, 1);
+    for (int x = 0; x < dn * ratio; ++x) src.plane(0).row(0)[x] = x % 2 ? 255 : 0;
+    Frame dst = make_frame(PixelFormat::gray8, dn, 1);
+    REQUIRE_OK(scale(src, dst, ScaleFilter::bilinear));
+    for (int x = 2; x < dn - 2; ++x) {
+      const int v = dst.plane(0).row(0)[x];
+      CHECK_MSG(std::abs(v - 127) <= 30, std::to_string(ratio) + "x stripe " + std::to_string(v));
+    }
+  }
+}
+
+TEST(chroma_siting_moves_only_subsampled_planes) {
+  for (const PixelFormat fmt : {PixelFormat::yuv420p, PixelFormat::nv12, PixelFormat::rgb24}) {
+    const Frame src = test::random_frame(fmt, 64, 32, 5);
+    Frame left = make_frame(fmt, 40, 20);
+    Frame center = make_frame(fmt, 40, 20);
+    REQUIRE_OK(scale(src, left, ScaleFilter::bilinear, {}, ChromaLocation::left));
+    REQUIRE_OK(scale(src, center, ScaleFilter::bilinear, {}, ChromaLocation::center));
+    for (int p = 0; p < left.plane_count(); ++p) {
+      const Plane a = left.plane(p);
+      const Plane b = center.plane(p);
+      bool same = true;
+      for (int y = 0; y < a.height; ++y) {
+        same = same && std::memcmp(a.row(y), b.row(y), static_cast<std::size_t>(a.width) *
+                                                           static_cast<std::size_t>(a.bytes_per_pixel)) == 0;
+      }
+      CHECK_MSG(same == (p == 0 || fmt == PixelFormat::rgb24),
+                std::string(pixfmt_name(fmt)) + " plane " + std::to_string(p));
+    }
+  }
+}
+
 TEST(all_isas_match) {
   for (const PixelFormat fmt : kFormats) {
     for (const ScaleFilter f : kFilters) {
@@ -294,8 +368,10 @@ TEST(all_isas_match) {
         const std::pair<int, int> targets[] = {
             {w, h}, {w * 3 / 2 + 1, h / 2 + 1}, {w / 2 + 1, h * 2}, {1, 1}, {w / 3 + 1, h + 3}};
         for (const auto& [dw, dh] : targets) {
-          CHECK_ALL_ISAS_MATCH([&] { return make_frame(fmt, dw, dh); },
-                               [&](Frame& out) { return scale(src, out, f); });
+          for (const ChromaLocation loc : {ChromaLocation::center, ChromaLocation::left}) {
+            CHECK_ALL_ISAS_MATCH([&] { return make_frame(fmt, dw, dh); },
+                                 [&](Frame& out) { return scale(src, out, f, {}, loc); });
+          }
         }
       }
     }
