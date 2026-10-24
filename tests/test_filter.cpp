@@ -1,5 +1,9 @@
 // filter suite. Owned by the filter unit.
+#include <algorithm>
 #include <array>
+#include <cstring>
+#include <string>
+#include <utility>
 
 #include "lanecast/filter.hpp"
 #include "test_support.hpp"
@@ -178,6 +182,153 @@ TEST(brightness_contrast_all_isas_match) {
       const Frame src = test::random_frame(fmt, w, h, 12);
       CHECK_ALL_ISAS_MATCH([&] { return make_frame(fmt, w, h); },
                            [&](Frame& out) { return brightness_contrast(src, out, 17, 333); });
+    }
+  }
+}
+
+namespace {
+
+constexpr PixelFormat kAllFormats[] = {PixelFormat::gray8, PixelFormat::yuv420p, PixelFormat::nv12,
+                                       PixelFormat::rgb24, PixelFormat::rgba,    PixelFormat::bgra};
+
+// Straightforward reference of the documented formula, per plane channel.
+Frame blur_reference(const Frame& src, int radius) {
+  static const int b1[] = {1, 2, 1};
+  static const int b2[] = {1, 4, 6, 4, 1};
+  const int* bk = radius == 1 ? b1 : b2;
+  Frame out = make_frame(src.format(), src.width(), src.height());
+  for (int p = 0; p < src.plane_count(); ++p) {
+    const Plane sp = src.plane(p);
+    const Plane dp = out.plane(p);
+    const int ch = sp.bytes_per_pixel;
+    for (int y = 0; y < sp.height; ++y) {
+      for (int x = 0; x < sp.width; ++x) {
+        for (int c = 0; c < ch; ++c) {
+          int v = 0;
+          for (int ky = 0; ky <= 2 * radius; ++ky) {
+            const int sy = std::clamp(y + ky - radius, 0, sp.height - 1);
+            int h = 0;
+            for (int kx = 0; kx <= 2 * radius; ++kx) {
+              const int sx = std::clamp(x + kx - radius, 0, sp.width - 1);
+              h += bk[kx] * sp.row(sy)[sx * ch + c];
+            }
+            v += bk[ky] * h;
+          }
+          const int shift = radius == 1 ? 4 : 8;
+          dp.row(y)[x * ch + c] = static_cast<std::uint8_t>((v + (1 << (shift - 1))) >> shift);
+        }
+      }
+    }
+  }
+  return out;
+}
+
+}  // namespace
+
+TEST(blur_constant_plane_is_identity) {
+  for (const int radius : {1, 2}) {
+    for (const PixelFormat fmt : kAllFormats) {
+      Frame src = make_frame(fmt, 13, 9);
+      for (int p = 0; p < src.plane_count(); ++p) {
+        const Plane pl = src.plane(p);
+        for (int y = 0; y < pl.height; ++y) {
+          std::memset(pl.row(y), 77 + p, static_cast<std::size_t>(pl.row_bytes()));
+        }
+      }
+      Frame dst = make_frame(fmt, 13, 9);
+      REQUIRE_OK(blur(src, dst, radius));
+      CHECK(test::first_difference(src, dst).empty());
+    }
+  }
+}
+
+TEST(blur_known_values) {
+  // Impulse of 255 at the center of a 5x5 plane: output is the kernel.
+  Frame src = make_frame(PixelFormat::gray8, 5, 5);
+  src.plane(0).row(2)[2] = 255;
+  Frame dst = make_frame(PixelFormat::gray8, 5, 5);
+  REQUIRE_OK(blur(src, dst, 1));
+  CHECK(dst.plane(0).row(2)[2] == 64);  // 255 * 4 / 16 = 63.75
+  CHECK(dst.plane(0).row(2)[1] == 32);  // 255 * 2 / 16 = 31.9
+  CHECK(dst.plane(0).row(1)[1] == 16);  // 255 / 16 = 15.9
+  CHECK(dst.plane(0).row(0)[0] == 0);
+  REQUIRE_OK(blur(src, dst, 2));
+  CHECK(dst.plane(0).row(2)[2] == 36);  // 255 * 36 / 256 = 35.9
+  CHECK(dst.plane(0).row(2)[1] == 24);  // 255 * 24 / 256 = 23.9
+  CHECK(dst.plane(0).row(0)[0] == 1);   // 255 / 256 = 1.0
+}
+
+TEST(blur_replicates_edges) {
+  // Width 1: horizontal taps all read the one pixel. Vertical column
+  // 10, 200, 50 with clamped rows.
+  Frame src = make_frame(PixelFormat::gray8, 1, 3);
+  src.plane(0).row(0)[0] = 10;
+  src.plane(0).row(1)[0] = 200;
+  src.plane(0).row(2)[0] = 50;
+  Frame dst = make_frame(PixelFormat::gray8, 1, 3);
+  REQUIRE_OK(blur(src, dst, 1));
+  // h = 4 * value; v = sum {1 2 1} of h; out = (v + 8) >> 4.
+  CHECK(dst.plane(0).row(0)[0] == ((4 * (10 + 2 * 10 + 200)) + 8) / 16);
+  CHECK(dst.plane(0).row(1)[0] == ((4 * (10 + 2 * 200 + 50)) + 8) / 16);
+  CHECK(dst.plane(0).row(2)[0] == ((4 * (200 + 2 * 50 + 50)) + 8) / 16);
+}
+
+TEST(blur_matches_reference) {
+  for (const int radius : {1, 2}) {
+    for (const PixelFormat fmt : kAllFormats) {
+      for (const auto& [w, h] :
+           {std::pair{1, 1}, std::pair{2, 7}, std::pair{9, 2}, std::pair{33, 17}}) {
+        const Frame src = test::random_frame(fmt, w, h, 40 + static_cast<std::uint64_t>(w));
+        Frame dst = make_frame(fmt, w, h);
+        REQUIRE_OK(blur(src, dst, radius));
+        const Frame ref = blur_reference(src, radius);
+        CHECK_MSG(test::first_difference(ref, dst).empty(),
+                  std::string(pixfmt_name(fmt)) + " r" + std::to_string(radius) + " " +
+                      std::to_string(w) + "x" + std::to_string(h) + ": " +
+                      test::first_difference(ref, dst));
+      }
+    }
+  }
+}
+
+TEST(blur_row_ranges_equal_whole_frame) {
+  for (const int radius : {1, 2}) {
+    for (const PixelFormat fmt : {PixelFormat::yuv420p, PixelFormat::nv12, PixelFormat::rgba}) {
+      const Frame src = test::random_frame(fmt, 41, 26, 8);
+      Frame whole = make_frame(fmt, 41, 26);
+      REQUIRE_OK(blur(src, whole, radius));
+      Frame parts = make_frame(fmt, 41, 26);
+      const int cuts[] = {0, 2, 10, 26};
+      for (int i = 0; i < 3; ++i) {
+        REQUIRE_OK(blur(src, parts, radius, RowRange{cuts[i], cuts[i + 1]}));
+      }
+      CHECK_MSG(test::first_difference(whole, parts).empty(),
+                std::string(pixfmt_name(fmt)) + " slices differ");
+    }
+  }
+}
+
+TEST(blur_rejects_bad_arguments) {
+  Frame a = make_frame(PixelFormat::yuv420p, 8, 8);
+  Frame b = make_frame(PixelFormat::yuv420p, 8, 8);
+  Frame c = make_frame(PixelFormat::yuv420p, 6, 8);
+  Frame empty;
+  CHECK(blur(a, b, 0) == Status::invalid_argument);
+  CHECK(blur(a, b, 3) == Status::invalid_argument);
+  CHECK(blur(a, a, 1) == Status::invalid_argument);
+  CHECK(blur(a, c, 1) == Status::invalid_argument);
+  CHECK(blur(empty, b, 1) == Status::invalid_argument);
+  CHECK(blur(a, b, 1, RowRange{1, 8}) == Status::invalid_argument);
+}
+
+TEST(blur_all_isas_match) {
+  for (const int radius : {1, 2}) {
+    for (const PixelFormat fmt : kAllFormats) {
+      for (const auto& [w, h] : test::test_sizes()) {
+        const Frame src = test::random_frame(fmt, w, h, 60);
+        CHECK_ALL_ISAS_MATCH([&] { return make_frame(fmt, w, h); },
+                             [&](Frame& out) { return blur(src, out, radius); });
+      }
     }
   }
 }

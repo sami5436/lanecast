@@ -35,10 +35,40 @@ void lut_skip_alpha_row(const std::uint8_t* src, std::uint8_t* dst, int pixels,
   }
 }
 
+void blur_h_row(const std::uint8_t* src, std::uint16_t* dst, int count, int channels,
+                int radius) {
+  const int c = channels;
+  if (radius == 1) {
+    for (int i = 0; i < count; ++i) {
+      dst[i] = static_cast<std::uint16_t>(src[i] + 2 * src[i + c] + src[i + 2 * c]);
+    }
+  } else {
+    for (int i = 0; i < count; ++i) {
+      dst[i] = static_cast<std::uint16_t>(src[i] + 4 * src[i + c] + 6 * src[i + 2 * c] +
+                                          4 * src[i + 3 * c] + src[i + 4 * c]);
+    }
+  }
+}
+
+void blur_v_row(const std::uint16_t* const* rows, std::uint8_t* dst, int count, int radius) {
+  if (radius == 1) {
+    for (int i = 0; i < count; ++i) {
+      dst[i] = static_cast<std::uint8_t>((rows[0][i] + 2 * rows[1][i] + rows[2][i] + 8) >> 4);
+    }
+  } else {
+    for (int i = 0; i < count; ++i) {
+      const int v = rows[0][i] + 4 * rows[1][i] + 6 * rows[2][i] + 4 * rows[3][i] + rows[4][i];
+      dst[i] = static_cast<std::uint8_t>((v + 128) >> 8);
+    }
+  }
+}
+
 }  // namespace
 
 void fill_scalar(Table& t) {
   t.blend = &blend_row;
+  t.blur_h = &blur_h_row;
+  t.blur_v = &blur_v_row;
   t.lut = &lut_row;
   t.lut_skip_alpha = &lut_skip_alpha_row;
 }
