@@ -37,6 +37,15 @@ using Yuv420BilinearToPackedRowFn = void (*)(const std::uint8_t* y, const std::u
                                              const std::uint8_t* v1, std::uint8_t* dst,
                                              int width, const YuvToRgbCoeffs& c,
                                              ChromaLocation loc);
+// One output row of 4:4:4 yuv -> packed. y, u, v hold `width` samples each in
+// Q7 (the 8-bit value times 128, so 0..32640), as the Q7 vertical scale
+// leaves them. Formula (convert.hpp's YUV to RGB with Q7 inputs and one more
+// 7 bits in the shift):
+//   ly = cy * (y - (y_offset << 7)) + (1 << 19)
+//   R = clamp8((ly + crv * (v - 16384)) >> 20), G and B likewise
+using Yuv444Q7ToPackedRowFn = void (*)(const std::int16_t* y, const std::int16_t* u,
+                                       const std::int16_t* v, std::uint8_t* dst, int width,
+                                       const YuvToRgbCoeffs& c);
 // One output row of nv12 -> packed. uv is the interleaved chroma row.
 using Nv12ToPackedRowFn = void (*)(const std::uint8_t* y, const std::uint8_t* uv,
                                    std::uint8_t* dst, int width, const YuvToRgbCoeffs& c);
@@ -65,6 +74,7 @@ using GrayToPackedRowFn = void (*)(const std::uint8_t* gray, std::uint8_t* dst, 
 // Status::not_implemented for it.
 struct Table {
   Yuv420ToPackedRowFn yuv420_to_packed[kPackedCount] = {};
+  Yuv444Q7ToPackedRowFn yuv444_q7_to_packed[kPackedCount] = {};
   Nv12ToPackedRowFn nv12_to_packed[kPackedCount] = {};
   Yuv420BilinearToPackedRowFn yuv420_bilinear_to_packed[kPackedCount] = {};
   Nv12BilinearToPackedRowFn nv12_bilinear_to_packed[kPackedCount] = {};
@@ -89,6 +99,12 @@ void fill_sse41_yuv2rgb(Table& t);
 void fill_sse41_rgb2yuv(Table& t);
 void fill_avx2_yuv2rgb(Table& t);
 void fill_avx2_rgb2yuv(Table& t);
+// 4:4:4 Q7 yuv -> packed, one TU per tier (called by fill_scalar / fill_neon /
+// fill_sse41 / fill_avx2).
+void fill_scalar_yuv444(Table& t);
+void fill_neon_yuv444(Table& t);
+void fill_sse41_yuv444(Table& t);
+void fill_avx2_yuv444(Table& t);
 
 // Table for a tier (clamped to what is supported). Built once, thread-safe.
 const Table& table(Isa isa);

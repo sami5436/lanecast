@@ -7,6 +7,7 @@
 #include <utility>
 #include <vector>
 
+#include "kernels/convert/kernels.hpp"
 #include "kernels/scale/kernels.hpp"
 #include "lanecast/pipeline.hpp"
 #include "test_support.hpp"
@@ -95,6 +96,62 @@ TEST(VerticalQ7KernelMatchesTheFormula) {
         CHECK_MSG(std::equal(want.begin(), want.end(), got.begin()),
                   test::show(isa) + " taps " + std::to_string(taps) + " count " +
                       std::to_string(count));
+      }
+    }
+  }
+}
+
+// One pixel of the Q7 4:4:4 formula (kernels/convert/kernels.hpp), written to
+// a packed layout (kernels::convert::Packed index p).
+void model_pixel(std::uint8_t* d, int p, int y, int u, int v, const YuvToRgbCoeffs& c) {
+  const auto clamp = [](int t) {
+    return static_cast<std::uint8_t>(t < 0 ? 0 : t > 255 ? 255 : t);
+  };
+  const int ly = c.cy * (y - (c.y_offset << 7)) + (1 << 19), cu = u - 16384, cv = v - 16384;
+  const int ri = p == kernels::convert::kBgra ? 2 : 0;
+  d[ri] = clamp((ly + c.crv * cv) >> 20);
+  d[1] = clamp((ly - c.cgu * cu - c.cgv * cv) >> 20);
+  d[2 - ri] = clamp((ly + c.cbu * cu) >> 20);
+  if (p != kernels::convert::kRgb24) d[3] = 255;
+}
+
+// The 4:4:4 row kernel against its formula, on every tier. Buffers carry the
+// row padding that kernels may touch.
+TEST(Yuv444RowKernelsMatchTheFormula) {
+  namespace kc = kernels::convert;
+  constexpr std::size_t kPad = 64;
+  const YuvToRgbCoeffs coeffs[] = {yuv_to_rgb_coeffs(ColorMatrix::bt601, ColorRange::limited),
+                                   yuv_to_rgb_coeffs(ColorMatrix::bt709, ColorRange::full),
+                                   yuv_to_rgb_coeffs(ColorMatrix::bt709, ColorRange::limited)};
+  test::Rng rng(444);
+  const auto sample = [&](std::size_t i) {
+    // Q7 samples; every fifth is an extreme to hit the clamps.
+    return static_cast<std::int16_t>(i % 5 == 0 ? (rng.byte() & 1 ? 255 * 128 : 0)
+                                                : rng.range(0, 255 * 128));
+  };
+  for (const int width : {1, 2, 15, 16, 17, 31, 33, 64, 70, 127, 128, 255}) {
+    const auto w = static_cast<std::size_t>(width);
+    std::vector<std::int16_t> y(w + kPad), u(w + kPad), v(w + kPad);
+    for (std::size_t i = 0; i < w; ++i) {
+      y[i] = sample(i);
+      u[i] = sample(i);
+      v[i] = sample(i);
+    }
+    for (const YuvToRgbCoeffs& c : coeffs) {
+      for (const int p : {kc::kRgb24, kc::kRgba, kc::kBgra}) {
+        const int bpp = p == kc::kRgb24 ? 3 : 4;
+        std::vector<std::uint8_t> want(w * 4, 255);
+        for (std::size_t i = 0; i < w; ++i) {
+          model_pixel(&want[i * static_cast<std::size_t>(bpp)], p, y[i], u[i], v[i], c);
+        }
+        for (const Isa isa : supported_isas()) {
+          std::vector<std::uint8_t> got(w * 4 + kPad, 255);
+          kc::table(isa).yuv444_q7_to_packed[p](y.data(), u.data(), v.data(), got.data(), width,
+                                                c);
+          CHECK_MSG(std::memcmp(want.data(), got.data(), w * static_cast<std::size_t>(bpp)) == 0,
+                    test::show(isa) + " width " + std::to_string(width) + " packed " +
+                        std::to_string(p));
+        }
       }
     }
   }
