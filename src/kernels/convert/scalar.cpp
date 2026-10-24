@@ -39,10 +39,13 @@ inline void store_rgb(std::uint8_t* d, int yv, int u, int v, const YuvToRgbCoeff
   if constexpr (L::a >= 0) d[L::a] = 255;
 }
 
-// Bilinear chroma for pixel x (formula in convert.hpp). cx, cxn are already
-// clamped column indices; a is the near row, b the vertical neighbor row.
-inline int bilinear(const std::uint8_t* a, const std::uint8_t* b, int cx, int cxn, bool odd) {
+// Bilinear chroma for pixel x (formula in convert.hpp). cx is the chroma
+// column of x, cxn / cxo the right and side neighbor columns (already
+// clamped); a is the near row, b the vertical neighbor row.
+inline int bilinear(const std::uint8_t* a, const std::uint8_t* b, int cx, int cxn, int cxo,
+                    bool odd, ChromaLocation loc) {
   const int v0 = 3 * a[cx] + b[cx];
+  if (loc == ChromaLocation::center) return (3 * v0 + 3 * a[cxo] + b[cxo] + 8) >> 4;
   const int h = odd ? v0 + 3 * a[cxn] + b[cxn] : 2 * v0;
   return (h + 4) >> 3;
 }
@@ -66,25 +69,28 @@ void nv12_nearest_row(const std::uint8_t* y, const std::uint8_t* uv, std::uint8_
 template <int P>
 void yuv420_bilinear_row(const std::uint8_t* y, const std::uint8_t* u0, const std::uint8_t* u1,
                          const std::uint8_t* v0, const std::uint8_t* v1, std::uint8_t* dst,
-                         int width, const YuvToRgbCoeffs& c, ChromaLocation) {
+                         int width, const YuvToRgbCoeffs& c, ChromaLocation loc) {
   const int cw = (width + 1) >> 1;
   for (int x = 0; x < width; ++x) {
     const int cx = x >> 1, cxn = std::min(cx + 1, cw - 1);
     const bool odd = (x & 1) != 0;
-    store_rgb<P>(dst + x * Layout<P>::bpp, y[x], bilinear(u0, u1, cx, cxn, odd),
-                 bilinear(v0, v1, cx, cxn, odd), c);
+    const int cxo = odd ? cxn : std::max(cx - 1, 0);
+    store_rgb<P>(dst + x * Layout<P>::bpp, y[x], bilinear(u0, u1, cx, cxn, cxo, odd, loc),
+                 bilinear(v0, v1, cx, cxn, cxo, odd, loc), c);
   }
 }
 
 template <int P>
 void nv12_bilinear_row(const std::uint8_t* y, const std::uint8_t* uv0, const std::uint8_t* uv1,
-                       std::uint8_t* dst, int width, const YuvToRgbCoeffs& c, ChromaLocation) {
+                       std::uint8_t* dst, int width, const YuvToRgbCoeffs& c, ChromaLocation loc) {
   const int cw = (width + 1) >> 1;
   for (int x = 0; x < width; ++x) {
     const int cx = x >> 1, cxn = std::min(cx + 1, cw - 1);
     const bool odd = (x & 1) != 0;
-    store_rgb<P>(dst + x * Layout<P>::bpp, y[x], bilinear(uv0, uv1, cx * 2, cxn * 2, odd),
-                 bilinear(uv0 + 1, uv1 + 1, cx * 2, cxn * 2, odd), c);
+    const int cxo = odd ? cxn : std::max(cx - 1, 0);
+    const int i = cx * 2, in = cxn * 2, io = cxo * 2;
+    store_rgb<P>(dst + x * Layout<P>::bpp, y[x], bilinear(uv0, uv1, i, in, io, odd, loc),
+                 bilinear(uv0 + 1, uv1 + 1, i, in, io, odd, loc), c);
   }
 }
 

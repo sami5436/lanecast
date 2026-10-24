@@ -65,13 +65,17 @@ int chroma_at(const Frame& f, int c, int cx, int cy) {
 }
 
 // Straight-from-the-spec chroma upsampling for one pixel (convert.hpp).
-int upsampled(const Frame& f, int c, int x, int y, ChromaMode mode) {
+int upsampled(const Frame& f, int c, int x, int y, ChromaMode mode, ChromaLocation loc) {
   const int cw = (f.width() + 1) / 2, ch = (f.height() + 1) / 2;
   const int cx = x / 2, cy = y / 2;
   if (mode == ChromaMode::nearest) return chroma_at(f, c, cx, cy);
   const int cxn = std::min(cx + 1, cw - 1);
   const int cyn = std::min(std::max(cy + (y % 2 ? 1 : -1), 0), ch - 1);
   const auto vert = [&](int i) { return 3 * chroma_at(f, c, i, cy) + chroma_at(f, c, i, cyn); };
+  if (loc == ChromaLocation::center) {
+    const int cxo = std::min(std::max(cx + (x % 2 ? 1 : -1), 0), cw - 1);
+    return (3 * vert(cx) + vert(cxo) + 8) >> 4;
+  }
   const int h = (x % 2) ? vert(cx) + vert(cxn) : 2 * vert(cx);
   return (h + 4) >> 3;
 }
@@ -79,8 +83,8 @@ int upsampled(const Frame& f, int c, int x, int y, ChromaMode mode) {
 Rgb ref_rgb(const Frame& f, int x, int y, const ConvertOptions& o) {
   const YuvToRgbCoeffs c = yuv_to_rgb_coeffs(o.matrix, o.range);
   const int yy = f.plane(0).row(y)[x] - c.y_offset;
-  const int u = upsampled(f, 0, x, y, o.chroma) - 128;
-  const int v = upsampled(f, 1, x, y, o.chroma) - 128;
+  const int u = upsampled(f, 0, x, y, o.chroma, o.chroma_loc) - 128;
+  const int v = upsampled(f, 1, x, y, o.chroma, o.chroma_loc) - 128;
   return {clamp8((c.cy * yy + c.crv * v + 4096) >> 13),
           clamp8((c.cy * yy - c.cgu * u - c.cgv * v + 4096) >> 13),
           clamp8((c.cy * yy + c.cbu * u + 4096) >> 13)};
@@ -96,6 +100,7 @@ constexpr PixelFormat kRgbTargets[] = {PixelFormat::rgb24, PixelFormat::rgba, Pi
 constexpr ColorMatrix kMatrices[] = {ColorMatrix::bt601, ColorMatrix::bt709};
 constexpr ColorRange kRanges[] = {ColorRange::limited, ColorRange::full};
 constexpr ChromaMode kChromaModes[] = {ChromaMode::nearest, ChromaMode::bilinear};
+constexpr ChromaLocation kLocations[] = {ChromaLocation::left, ChromaLocation::center};
 
 // Sets every chroma sample of a 4:2:0 frame (planar or interleaved).
 void set_chroma(Frame& f, int u, int v) {
@@ -203,21 +208,23 @@ TEST(yuv_to_rgb_matches_reference_model) {
   for (const PixelFormat src : kYuvSources) {
     for (const PixelFormat dst : kRgbTargets) {
       for (const ChromaMode mode : kChromaModes) {
-        for (const auto& [w, h] : test::test_sizes()) {
-          const Frame in = test::random_frame(src, w, h, ++seed);
-          const ConvertOptions o{ColorMatrix::bt709, ColorRange::limited, mode};
-          Frame out = test::random_frame(dst, w, h, ++seed);
-          REQUIRE_OK(convert(in, out, o));
-          int bad = 0;
-          for (int y = 0; y < h; ++y) {
-            for (int x = 0; x < w; ++x) {
-              const Rgb a = pixel(out, x, y), b = ref_rgb(in, x, y, o);
-              bad += a.r != b.r || a.g != b.g || a.b != b.b;
+        for (const ChromaLocation loc : kLocations) {
+          for (const auto& [w, h] : test::test_sizes()) {
+            const Frame in = test::random_frame(src, w, h, ++seed);
+            const ConvertOptions o{ColorMatrix::bt709, ColorRange::limited, mode, loc};
+            Frame out = test::random_frame(dst, w, h, ++seed);
+            REQUIRE_OK(convert(in, out, o));
+            int bad = 0;
+            for (int y = 0; y < h; ++y) {
+              for (int x = 0; x < w; ++x) {
+                const Rgb a = pixel(out, x, y), b = ref_rgb(in, x, y, o);
+                bad += a.r != b.r || a.g != b.g || a.b != b.b;
+              }
             }
+            CHECK_MSG(bad == 0, std::string(pixfmt_name(src)) + " -> " +
+                                    std::string(pixfmt_name(dst)) + " " + std::to_string(w) + "x" +
+                                    std::to_string(h) + ": " + std::to_string(bad) + " bad pixels");
           }
-          CHECK_MSG(bad == 0, std::string(pixfmt_name(src)) + " -> " +
-                                  std::string(pixfmt_name(dst)) + " " + std::to_string(w) + "x" +
-                                  std::to_string(h) + ": " + std::to_string(bad) + " bad pixels");
         }
       }
     }
@@ -263,11 +270,13 @@ TEST(yuv_to_rgb_all_isas_match) {
   for (const PixelFormat src : kYuvSources) {
     for (const PixelFormat dst : kRgbTargets) {
       for (const ChromaMode mode : kChromaModes) {
-        for (const auto& [w, h] : test::test_sizes()) {
-          const Frame in = test::random_frame(src, w, h, 77 + w * 31 + h);
-          const ConvertOptions o{ColorMatrix::bt709, ColorRange::limited, mode};
-          CHECK_ALL_ISAS_MATCH([&] { return test::random_frame(dst, w, h, 3); },
-                               [&](Frame& out) { return convert(in, out, o); });
+        for (const ChromaLocation loc : kLocations) {
+          for (const auto& [w, h] : test::test_sizes()) {
+            const Frame in = test::random_frame(src, w, h, 77 + w * 31 + h);
+            const ConvertOptions o{ColorMatrix::bt709, ColorRange::limited, mode, loc};
+            CHECK_ALL_ISAS_MATCH([&] { return test::random_frame(dst, w, h, 3); },
+                                 [&](Frame& out) { return convert(in, out, o); });
+          }
         }
       }
     }

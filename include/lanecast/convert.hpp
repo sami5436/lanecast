@@ -39,6 +39,14 @@
 //   H never exceeds 2040, so every intermediate fits int16. The result is
 //   rounded to 8 bits before the matrix step. Flat chroma is
 //   reproduced exactly.
+//   With chroma_loc = center the chroma column is centered between luma
+//   columns 2*cx and 2*cx + 1, so the horizontal weights are 3:1 toward the
+//   nearer chroma column (same cxn, vertical V and cyn as above, but the
+//   horizontal neighbor is on the side of the pixel):
+//     cxo = clamp(cx + ((x & 1) ? 1 : -1), 0, cw - 1)
+//     H   = 3 * V[cx] + V[cxo]
+//     U   = (H + 8) >> 4                                 (one rounding, Q4)
+//   H never exceeds 4080.
 //
 // RGB to YUV, Q15 coefficients k = rgb_to_yuv_coeffs(matrix, range):
 //   Y = clamp8((k.yr * R + k.yg * G + k.yb * B + (k.y_offset << 15) + 16384) >> 15)

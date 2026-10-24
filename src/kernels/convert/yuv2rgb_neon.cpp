@@ -80,11 +80,22 @@ void nv12_nearest_row(const std::uint8_t* y, const std::uint8_t* uv, std::uint8_
 // Vertical pass of the bilinear filter for 8 chroma samples: 3 * a + b.
 inline uint16x8_t vert(uint8x8_t a, uint8x8_t b) { return vmlal_u8(vmovl_u8(b), a, vdup_n_u8(3)); }
 
-// Horizontal pass: v is column cx.. and vn the right neighbors. Even luma
-// columns take 2 * v, odd ones v + vn; both are rounded once as (h + 4) >> 3.
-inline uint8x16_t horiz(uint16x8_t v, uint16x8_t vn) {
+// Horizontal pass, left siting: v is column cx.. and vn the right neighbors.
+// Even luma columns take 2 * v, odd ones v + vn; both are rounded once as
+// (h + 4) >> 3.
+inline uint8x16_t horiz_left(uint16x8_t v, uint16x8_t vp, uint16x8_t vn) {
+  (void)vp;
   const uint8x8_t even = vrshrn_n_u16(vshlq_n_u16(v, 1), 3);
   const uint8x8_t odd = vrshrn_n_u16(vaddq_u16(v, vn), 3);
+  return vcombine_u8(vzip1_u8(even, odd), vzip2_u8(even, odd));
+}
+
+// Center siting: 3 * v plus the neighbor on the pixel's side (vp for even
+// columns, vn for odd), rounded as (h + 8) >> 4.
+inline uint8x16_t horiz_center(uint16x8_t v, uint16x8_t vp, uint16x8_t vn) {
+  const uint16x8_t v3 = vaddq_u16(vshlq_n_u16(v, 1), v);
+  const uint8x8_t even = vrshrn_n_u16(vaddq_u16(v3, vp), 4);
+  const uint8x8_t odd = vrshrn_n_u16(vaddq_u16(v3, vn), 4);
   return vcombine_u8(vzip1_u8(even, odd), vzip2_u8(even, odd));
 }
 
@@ -96,18 +107,22 @@ struct Vert {
 // Walks the row 8 chroma samples (16 pixels) at a time. load(cx) returns the
 // vertical pass for chroma columns cx..cx+7 and may read past the plane's
 // visible width (padding). The right neighbor of the last visible chroma
-// column is the column itself, so the final block patches that lane.
-template <int P, class Load>
+// column is the column itself, so the final block patches that lane. The
+// left neighbor of column 0 is column 0 (center siting only).
+template <int P, bool Center, class Load>
 inline void bilinear_row(const std::uint8_t* y, std::uint8_t* dst, int width, const Coef& c,
                          Load load) {
+  constexpr auto horiz = Center ? &horiz_center : &horiz_left;
   const int cw = (width + 1) >> 1;
   Vert cur = load(0);
+  Vert prev = {vdupq_laneq_u16(cur.u, 0), vdupq_laneq_u16(cur.v, 0)};
   int cx = 0;
   for (; cx + 8 < cw; cx += 8) {
     const Vert next = load(cx + 8);
-    const uint8x16_t u = horiz(cur.u, vextq_u16(cur.u, next.u, 1));
-    const uint8x16_t v = horiz(cur.v, vextq_u16(cur.v, next.v, 1));
+    const uint8x16_t u = horiz(cur.u, vextq_u16(prev.u, cur.u, 7), vextq_u16(cur.u, next.u, 1));
+    const uint8x16_t v = horiz(cur.v, vextq_u16(prev.v, cur.v, 7), vextq_u16(cur.v, next.v, 1));
     store16<P>(dst + 2 * cx * Layout<P>::bpp, yuv16(vld1q_u8(y + 2 * cx), u, v, c));
+    prev = cur;
     cur = next;
   }
   // Last block: lane cw - 1 - cx (0..7) must see itself as its right neighbor.
@@ -117,14 +132,26 @@ inline void bilinear_row(const std::uint8_t* y, std::uint8_t* dst, int width, co
   const uint16x8_t un = vbslq_u16(at_or_after, cur.u, vextq_u16(cur.u, cur.u, 1));
   const uint16x8_t vn = vbslq_u16(at_or_after, cur.v, vextq_u16(cur.v, cur.v, 1));
   store16<P>(dst + 2 * cx * Layout<P>::bpp,
-             yuv16(vld1q_u8(y + 2 * cx), horiz(cur.u, un), horiz(cur.v, vn), c));
+             yuv16(vld1q_u8(y + 2 * cx),
+                   horiz(cur.u, vextq_u16(prev.u, cur.u, 7), un),
+                   horiz(cur.v, vextq_u16(prev.v, cur.v, 7), vn), c));
+}
+
+template <int P, class Load>
+inline void bilinear_dispatch(const std::uint8_t* y, std::uint8_t* dst, int width,
+                              const YuvToRgbCoeffs& cf, ChromaLocation loc, Load load) {
+  if (loc == ChromaLocation::center) {
+    bilinear_row<P, true>(y, dst, width, make_coef(cf), load);
+  } else {
+    bilinear_row<P, false>(y, dst, width, make_coef(cf), load);
+  }
 }
 
 template <int P>
 void yuv420_bilinear_row(const std::uint8_t* y, const std::uint8_t* u0, const std::uint8_t* u1,
                          const std::uint8_t* v0, const std::uint8_t* v1, std::uint8_t* dst,
-                         int width, const YuvToRgbCoeffs& cf, ChromaLocation) {
-  bilinear_row<P>(y, dst, width, make_coef(cf), [&](int cx) {
+                         int width, const YuvToRgbCoeffs& cf, ChromaLocation loc) {
+  bilinear_dispatch<P>(y, dst, width, cf, loc, [&](int cx) {
     return Vert{vert(vld1_u8(u0 + cx), vld1_u8(u1 + cx)),
                 vert(vld1_u8(v0 + cx), vld1_u8(v1 + cx))};
   });
@@ -132,8 +159,8 @@ void yuv420_bilinear_row(const std::uint8_t* y, const std::uint8_t* u0, const st
 
 template <int P>
 void nv12_bilinear_row(const std::uint8_t* y, const std::uint8_t* uv0, const std::uint8_t* uv1,
-                       std::uint8_t* dst, int width, const YuvToRgbCoeffs& cf, ChromaLocation) {
-  bilinear_row<P>(y, dst, width, make_coef(cf), [&](int cx) {
+                       std::uint8_t* dst, int width, const YuvToRgbCoeffs& cf, ChromaLocation loc) {
+  bilinear_dispatch<P>(y, dst, width, cf, loc, [&](int cx) {
     const uint8x8x2_t a = vld2_u8(uv0 + 2 * cx), b = vld2_u8(uv1 + 2 * cx);
     return Vert{vert(a.val[0], b.val[0]), vert(a.val[1], b.val[1])};
   });
