@@ -127,6 +127,7 @@ void fill_sse41(Table& t) {
   t.gray_to_packed[kRgb24] = &gray_to_packed_row<kRgb24>;
   t.gray_to_packed[kRgba] = &gray_to_packed_row<kRgba>;
   t.gray_to_packed[kBgra] = &gray_to_packed_row<kBgra>;
+  fill_sse41_yuv2rgb(t);
 }
 
 }  // namespace lanecast::kernels::convert
