@@ -194,4 +194,219 @@ TEST(raw_argument_errors) {
   CHECK_EQ(writer->write(random_frame(PixelFormat::gray8, 4, 4, 1)), Status::invalid_argument);
 }
 
+
+// ---- y4m ----
+
+TEST(y4m_round_trip) {
+  TempDir dir;
+  const std::pair<int, int> sizes[] = {{1, 1}, {2, 2}, {7, 5}, {64, 48}, {33, 17}};
+  for (const auto& [w, h] : sizes) {
+    for (const PixelFormat fmt : {PixelFormat::yuv420p, PixelFormat::gray8}) {
+      VideoInfo info = make_info(fmt, w, h);
+      round_trip(dir.file("a.y4m"), info, ReaderOptions{}, 3, 7);
+    }
+  }
+}
+
+TEST(y4m_round_trip_keeps_stream_info) {
+  TempDir dir;
+  VideoInfo info = make_info(PixelFormat::yuv420p, 16, 8);
+  info.fps_num = 30000;
+  info.fps_den = 1001;
+  info.sar_num = 4;
+  info.sar_den = 3;
+  info.range = ColorRange::full;
+  std::unique_ptr<FrameWriter> writer;
+  REQUIRE_OK(open_writer(dir.file("a.y4m"), info, std::nullopt, writer));
+  REQUIRE_OK(writer->write(random_frame(info.format, 16, 8, 1)));
+  REQUIRE_OK(writer->finish());
+
+  std::unique_ptr<FrameReader> reader;
+  REQUIRE_OK(open_reader(dir.file("a.y4m"), ReaderOptions{}, reader));
+  const VideoInfo& got = reader->info();
+  CHECK_EQ(got.fps_num, 30000);
+  CHECK_EQ(got.fps_den, 1001);
+  CHECK_EQ(got.sar_num, 4);
+  CHECK_EQ(got.sar_den, 3);
+  CHECK(got.range == ColorRange::full);
+}
+
+TEST(y4m_writer_header_text) {
+  TempDir dir;
+  VideoInfo info = make_info(PixelFormat::yuv420p, 4, 2);
+  std::unique_ptr<FrameWriter> writer;
+  REQUIRE_OK(open_writer(dir.file("a.y4m"), info, std::nullopt, writer));
+  REQUIRE_OK(writer->finish());
+  std::ifstream in(dir.file("a.y4m"), std::ios::binary);
+  std::string line;
+  std::getline(in, line);
+  CHECK_EQ(line, std::string("YUV4MPEG2 W4 H2 F25:1 Ip A1:1 C420mpeg2 XCOLORRANGE=LIMITED"));
+}
+
+namespace {
+
+// A minimal valid y4m with the given header tail, one 2x2 frame of `payload`.
+std::string y4m_bytes(const std::string& header, const std::string& frames) {
+  return "YUV4MPEG2 " + header + "\n" + frames;
+}
+
+const std::string kFrame2x2 = std::string("FRAME\n") + std::string(6, '\x55');
+
+// Opens `bytes` as a y4m file and returns the open status.
+Status open_y4m_bytes(const TempDir& dir, const std::string& bytes,
+                      std::unique_ptr<FrameReader>& reader) {
+  write_bytes(dir.file("t.y4m"), bytes);
+  return open_reader(dir.file("t.y4m"), ReaderOptions{}, reader);
+}
+
+}  // namespace
+
+TEST(y4m_chroma_tags) {
+  TempDir dir;
+  std::unique_ptr<FrameReader> reader;
+  for (const char* tag : {"", " C420", " C420jpeg", " C420mpeg2", " C420paldv"}) {
+    REQUIRE_OK(open_y4m_bytes(dir, y4m_bytes(std::string("W2 H2") + tag, kFrame2x2), reader));
+    CHECK(reader->info().format == PixelFormat::yuv420p);
+  }
+  REQUIRE_OK(open_y4m_bytes(dir, y4m_bytes("W2 H2 Cmono", "FRAME\n\x01\x02\x03\x04"), reader));
+  CHECK(reader->info().format == PixelFormat::gray8);
+  Frame f;
+  REQUIRE_OK(reader->read(f));
+  CHECK_EQ(f.plane(0).row(1)[1], 4);
+}
+
+TEST(y4m_unsupported_layouts) {
+  TempDir dir;
+  std::unique_ptr<FrameReader> reader;
+  for (const char* tag : {" C444", " C422", " C411", " C420p10", " C444alpha", " Cmono12"}) {
+    CHECK_EQ(open_y4m_bytes(dir, y4m_bytes(std::string("W2 H2") + tag, kFrame2x2), reader),
+             Status::unsupported_format);
+  }
+  for (const char* tag : {" It", " Ib", " Im"}) {
+    CHECK_EQ(open_y4m_bytes(dir, y4m_bytes(std::string("W2 H2") + tag, kFrame2x2), reader),
+             Status::unsupported_format);
+  }
+  CHECK_EQ(open_y4m_bytes(dir, y4m_bytes("W99999 H2", ""), reader), Status::unsupported_format);
+}
+
+TEST(y4m_header_fields) {
+  TempDir dir;
+  std::unique_ptr<FrameReader> reader;
+  REQUIRE_OK(open_y4m_bytes(
+      dir, y4m_bytes("W2 H2 F24000:1001 Ip A32:27 C420jpeg XYSCSS=420JPEG XFOO=bar", kFrame2x2),
+      reader));
+  CHECK_EQ(reader->info().width, 2);
+  CHECK_EQ(reader->info().fps_num, 24000);
+  CHECK_EQ(reader->info().fps_den, 1001);
+  CHECK_EQ(reader->info().sar_num, 32);
+  CHECK_EQ(reader->info().sar_den, 27);
+  CHECK(reader->info().range == ColorRange::full);  // C420jpeg implies full
+
+  REQUIRE_OK(open_y4m_bytes(dir, y4m_bytes("W2 H2 C420jpeg XCOLORRANGE=LIMITED", kFrame2x2),
+                            reader));
+  CHECK(reader->info().range == ColorRange::limited);
+  REQUIRE_OK(open_y4m_bytes(dir, y4m_bytes("W2 H2 XCOLORRANGE=FULL", kFrame2x2), reader));
+  CHECK(reader->info().range == ColorRange::full);
+
+  // Missing F and A fall back to 25:1 and 1:1; unknown ratios 0:0 do too.
+  REQUIRE_OK(open_y4m_bytes(dir, y4m_bytes("W2 H2", kFrame2x2), reader));
+  CHECK_EQ(reader->info().fps_num, 25);
+  CHECK_EQ(reader->info().sar_den, 1);
+  REQUIRE_OK(open_y4m_bytes(dir, y4m_bytes("W2 H2 F0:0 A0:0 I?", kFrame2x2), reader));
+  CHECK_EQ(reader->info().fps_num, 25);
+  CHECK_EQ(reader->info().sar_num, 1);
+}
+
+TEST(y4m_frame_parameters_are_ignored) {
+  TempDir dir;
+  std::unique_ptr<FrameReader> reader;
+  REQUIRE_OK(open_y4m_bytes(
+      dir, y4m_bytes("W2 H2", "FRAME Ixyz\n" + std::string(6, '\x07') + "FRAME\n" +
+                                  std::string(6, '\x09')),
+      reader));
+  Frame f;
+  REQUIRE_OK(reader->read(f));
+  CHECK_EQ(f.plane(0).row(0)[0], 7);
+  REQUIRE_OK(reader->read(f));
+  CHECK_EQ(f.plane(2).row(0)[0], 9);
+  CHECK_EQ(reader->read(f), Status::end_of_stream);
+}
+
+TEST(y4m_malformed_headers) {
+  TempDir dir;
+  std::unique_ptr<FrameReader> reader;
+  CHECK_EQ(open_y4m_bytes(dir, "", reader), Status::parse_error);
+  CHECK_EQ(open_y4m_bytes(dir, "YUV4MPEG1 W2 H2\n", reader), Status::parse_error);
+  CHECK_EQ(open_y4m_bytes(dir, "YUV4MPEG2W2 H2\n", reader), Status::parse_error);
+  CHECK_EQ(open_y4m_bytes(dir, "YUV4MPEG2 H2\n", reader), Status::parse_error);
+  CHECK_EQ(open_y4m_bytes(dir, "YUV4MPEG2 W2\n", reader), Status::parse_error);
+  CHECK_EQ(open_y4m_bytes(dir, "YUV4MPEG2 W0 H2\n", reader), Status::parse_error);
+  CHECK_EQ(open_y4m_bytes(dir, "YUV4MPEG2 Wabc H2\n", reader), Status::parse_error);
+  CHECK_EQ(open_y4m_bytes(dir, "YUV4MPEG2 W-2 H2\n", reader), Status::parse_error);
+  CHECK_EQ(open_y4m_bytes(dir, "YUV4MPEG2 W2 H2 F30\n", reader), Status::parse_error);
+  CHECK_EQ(open_y4m_bytes(dir, "YUV4MPEG2 W2 H2 F30:0\n", reader), Status::parse_error);
+  CHECK_EQ(open_y4m_bytes(dir, "YUV4MPEG2 W2 H2", reader), Status::parse_error);  // no newline
+  CHECK_EQ(open_y4m_bytes(dir, "YUV4MPEG2 W2 H2 X" + std::string(5000, 'a') + "\n", reader),
+           Status::parse_error);
+}
+
+TEST(y4m_truncated_and_bad_frames) {
+  TempDir dir;
+  std::unique_ptr<FrameReader> reader;
+  Frame f;
+  // Header only: clean end of stream.
+  REQUIRE_OK(open_y4m_bytes(dir, y4m_bytes("W2 H2", ""), reader));
+  CHECK_EQ(reader->read(f), Status::end_of_stream);
+
+  // Pixel data cut short, at several points.
+  for (const std::size_t keep : {0u, 3u, 5u}) {
+    REQUIRE_OK(open_y4m_bytes(
+        dir, y4m_bytes("W2 H2", kFrame2x2.substr(0, 6 + keep)), reader));
+    CHECK_EQ(reader->read(f), Status::parse_error);
+  }
+  // FRAME line cut short or garbled.
+  REQUIRE_OK(open_y4m_bytes(dir, y4m_bytes("W2 H2", "FRAM"), reader));
+  CHECK_EQ(reader->read(f), Status::parse_error);
+  REQUIRE_OK(open_y4m_bytes(dir, y4m_bytes("W2 H2", "FRAME"), reader));
+  CHECK_EQ(reader->read(f), Status::parse_error);
+  REQUIRE_OK(open_y4m_bytes(dir, y4m_bytes("W2 H2", "FRAMEX\n" + std::string(6, 'a')), reader));
+  CHECK_EQ(reader->read(f), Status::parse_error);
+  REQUIRE_OK(open_y4m_bytes(dir, y4m_bytes("W2 H2", "\n" + std::string(6, 'a')), reader));
+  CHECK_EQ(reader->read(f), Status::parse_error);
+  // Second frame cut short after a good first one.
+  REQUIRE_OK(open_y4m_bytes(dir, y4m_bytes("W2 H2", kFrame2x2 + kFrame2x2.substr(0, 9)), reader));
+  REQUIRE_OK(reader->read(f));
+  CHECK_EQ(reader->read(f), Status::parse_error);
+}
+
+TEST(y4m_writer_rejects_unsupported) {
+  TempDir dir;
+  std::unique_ptr<FrameWriter> writer;
+  for (const PixelFormat fmt : {PixelFormat::nv12, PixelFormat::rgb24, PixelFormat::rgba,
+                                PixelFormat::bgra}) {
+    CHECK_EQ(open_writer(dir.file("a.y4m"), make_info(fmt, 4, 4), std::nullopt, writer),
+             Status::unsupported_format);
+  }
+  VideoInfo bad = make_info(PixelFormat::yuv420p, 4, 4);
+  bad.fps_den = 0;
+  CHECK_EQ(open_writer(dir.file("a.y4m"), bad, std::nullopt, writer), Status::invalid_argument);
+}
+
+TEST(y4m_reader_reuses_the_frame_buffer) {
+  TempDir dir;
+  const VideoInfo info = make_info(PixelFormat::yuv420p, 40, 30);
+  std::unique_ptr<FrameWriter> writer;
+  REQUIRE_OK(open_writer(dir.file("a.y4m"), info, std::nullopt, writer));
+  for (int i = 0; i < 3; ++i) REQUIRE_OK(writer->write(random_frame(info.format, 40, 30, i)));
+  REQUIRE_OK(writer->finish());
+  std::unique_ptr<FrameReader> reader;
+  REQUIRE_OK(open_reader(dir.file("a.y4m"), ReaderOptions{}, reader));
+  Frame f;
+  REQUIRE_OK(reader->read(f));
+  const std::uint8_t* first = f.plane(1).data;
+  REQUIRE_OK(reader->read(f));
+  REQUIRE_OK(reader->read(f));
+  CHECK(f.plane(1).data == first);
+}
+
 }  // namespace lanecast::test
