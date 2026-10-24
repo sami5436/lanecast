@@ -18,27 +18,35 @@ inline uint8x16_t tail_mask(int rem) {
   return vcltq_u8(vld1q_u8(kIota), vdupq_n_u8(static_cast<std::uint8_t>(rem)));
 }
 
-// Squared |a - b| of 16 bytes, pairwise-accumulated into four u32 lanes. A
-// lane gains at most 4 * 65025 per call, so callers flush every 8192 calls.
-inline uint32x4_t sse_block(uint32x4_t acc, uint8x16_t d) {
-  acc = vpadalq_u16(acc, vmull_u8(vget_low_u8(d), vget_low_u8(d)));
-  return vpadalq_u16(acc, vmull_high_u8(d, d));
-}
-
 std::uint64_t sse_row(const std::uint8_t* a, const std::uint8_t* b, int count) {
   std::uint64_t total = 0;
   while (count >= 16) {
     const int n = count / 16 < 8192 ? count / 16 : 8192;
-    uint32x4_t acc = vdupq_n_u32(0);
-    for (int i = 0; i < n; ++i, a += 16, b += 16) {
-      acc = sse_block(acc, vabdq_u8(vld1q_u8(a), vld1q_u8(b)));
+    // Four independent accumulators hide the vpadal latency.
+    uint32x4_t acc0 = vdupq_n_u32(0), acc1 = acc0, acc2 = acc0, acc3 = acc0;
+    int i = 0;
+    for (; i + 2 <= n; i += 2, a += 32, b += 32) {
+      const uint8x16_t d0 = vabdq_u8(vld1q_u8(a), vld1q_u8(b));
+      const uint8x16_t d1 = vabdq_u8(vld1q_u8(a + 16), vld1q_u8(b + 16));
+      acc0 = vpadalq_u16(acc0, vmull_u8(vget_low_u8(d0), vget_low_u8(d0)));
+      acc1 = vpadalq_u16(acc1, vmull_high_u8(d0, d0));
+      acc2 = vpadalq_u16(acc2, vmull_u8(vget_low_u8(d1), vget_low_u8(d1)));
+      acc3 = vpadalq_u16(acc3, vmull_high_u8(d1, d1));
     }
-    total += vaddlvq_u32(acc);
+    if (i < n) {
+      const uint8x16_t d = vabdq_u8(vld1q_u8(a), vld1q_u8(b));
+      acc0 = vpadalq_u16(acc0, vmull_u8(vget_low_u8(d), vget_low_u8(d)));
+      acc1 = vpadalq_u16(acc1, vmull_high_u8(d, d));
+      a += 16;
+      b += 16;
+    }
+    total += vaddlvq_u32(vaddq_u32(vaddq_u32(acc0, acc1), vaddq_u32(acc2, acc3)));
     count -= n * 16;
   }
   if (count > 0) {
     const uint8x16_t d = vandq_u8(vabdq_u8(vld1q_u8(a), vld1q_u8(b)), tail_mask(count));
-    total += vaddlvq_u32(sse_block(vdupq_n_u32(0), d));
+    total += vaddlvq_u32(vaddq_u32(vpaddlq_u16(vmull_u8(vget_low_u8(d), vget_low_u8(d))),
+                                   vpaddlq_u16(vmull_high_u8(d, d))));
   }
   return total;
 }
