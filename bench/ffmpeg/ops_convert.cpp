@@ -55,6 +55,11 @@ void add_convert_comparisons(std::vector<Comparison>& out) {
     add(out, "nearest vs default", F::yuv420p, to, SWS_BICUBIC, ChromaMode::nearest,
         ChromaLocation::left);
   }
+  add(out, "left", F::rgba, F::yuv420p, kBilinear, ChromaMode::bilinear, ChromaLocation::left);
+  add(out, "center", F::rgba, F::yuv420p, kBilinear, ChromaMode::bilinear,
+      ChromaLocation::center);
+  add(out, "left vs default", F::rgba, F::yuv420p, SWS_BICUBIC, ChromaMode::bilinear,
+      ChromaLocation::left);
 }
 
 }  // namespace lanecast::bench::ff
