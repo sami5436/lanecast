@@ -84,6 +84,11 @@ void fill_neon_yuv2rgb(Table& t);
 void fill_neon_rgb2yuv(Table& t);
 void fill_sse41(Table& t);
 void fill_avx2(Table& t);
+// Called by fill_sse41 / fill_avx2, likewise split by direction.
+void fill_sse41_yuv2rgb(Table& t);
+void fill_sse41_rgb2yuv(Table& t);
+void fill_avx2_yuv2rgb(Table& t);
+void fill_avx2_rgb2yuv(Table& t);
 
 // Table for a tier (clamped to what is supported). Built once, thread-safe.
 const Table& table(Isa isa);
