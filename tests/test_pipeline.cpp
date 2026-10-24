@@ -111,5 +111,78 @@ TEST(RunSlicedReturnsFirstFailure) {
            Status::invalid_argument);
 }
 
+using Args = std::vector<std::pair<std::string, std::string>>;
+
+Status parse(const std::string& text, std::vector<FilterSpec>& out, std::string* error = nullptr) {
+  return parse_filter_chain(text, out, error);
+}
+
+TEST(ParseAcceptsDocumentedChains) {
+  std::vector<FilterSpec> f;
+  REQUIRE_OK(parse("scale=1280:720,format=rgb24", f));
+  REQUIRE(f.size() == 2);
+  CHECK_EQ(f[0].name, std::string("scale"));
+  CHECK(f[0].args == (Args{{"w", "1280"}, {"h", "720"}}));
+  CHECK_EQ(f[1].name, std::string("format"));
+  CHECK(f[1].args == (Args{{"pix_fmt", "rgb24"}}));
+
+  REQUIRE_OK(parse("scale=640:-2:flags=area", f));
+  CHECK(f[0].args == (Args{{"w", "640"}, {"h", "-2"}, {"flags", "area"}}));
+
+  REQUIRE_OK(parse("scale=w=-1:h=360", f));
+  CHECK(f[0].args == (Args{{"w", "-1"}, {"h", "360"}}));
+
+  REQUIRE_OK(parse("format=yuv420p:matrix=bt709:range=full:chroma=nearest", f));
+  CHECK(f[0].args == (Args{{"pix_fmt", "yuv420p"},
+                           {"matrix", "bt709"},
+                           {"range", "full"},
+                           {"chroma", "nearest"}}));
+
+  REQUIRE_OK(parse(" blur=3 , eq=brightness=10:contrast=1.5 ", f));
+  REQUIRE(f.size() == 2);
+  CHECK(f[0].args == (Args{{"size", "3"}}));
+  CHECK(f[1].args == (Args{{"brightness", "10"}, {"contrast", "1.5"}}));
+
+  REQUIRE_OK(parse("eq", f));
+  REQUIRE(f.size() == 1);
+  CHECK(f[0].args.empty());
+}
+
+TEST(ParseEmptyChainIsPassthrough) {
+  std::vector<FilterSpec> f(3);
+  REQUIRE_OK(parse("", f));
+  CHECK(f.empty());
+  REQUIRE_OK(parse("   ", f));
+  CHECK(f.empty());
+}
+
+TEST(ParseRejectsBadChains) {
+  const char* const bad[] = {
+      "scale",                    // missing w and h
+      "scale=640",                // missing h
+      "scale=640:360:100",        // too many positionals
+      "scale=640:360:flags=",     // empty value
+      "scale=640:360:foo=1",      // unknown option
+      "scale=w=640:360",          // positional after keyed
+      "scale=640:360:w=1",        // repeated option
+      "scale=640::flags=area",    // empty argument
+      "format",                   // missing pix_fmt
+      "format=rgb24:rgb24",       // too many positionals
+      "blur",                     // missing size
+      "eq=gamma=2",               // unknown option
+      "nosuchfilter=1",           // unknown filter
+      "=1",                       // no name
+      "scale=1:1,,format=rgb24",  // empty filter
+      "scale=1:1,",               // trailing comma
+      ",scale=1:1",               // leading comma
+  };
+  for (const char* text : bad) {
+    std::vector<FilterSpec> f;
+    std::string error;
+    CHECK_MSG(parse(text, f, &error) == Status::parse_error, text);
+    CHECK_MSG(!error.empty(), text);
+  }
+}
+
 }  // namespace
 }  // namespace lanecast

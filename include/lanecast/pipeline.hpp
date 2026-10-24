@@ -102,14 +102,23 @@ class ScaleConvert {
 // Filter chain grammar (ffmpeg -vf subset):
 //   chain  := filter ("," filter)*
 //   filter := name ["=" arg (":" arg)*]
-//   arg    := value | key "=" value      (positional args have an empty key)
-// Filters:
-//   scale=W:H[:flags=bilinear|area]   W or H = -1 keeps aspect ratio, rounded
-//                                     to the format's subsampling multiple
-//   format=PIXFMT[:matrix=bt601|bt709][:range=limited|full]
-//   blur=3|5                          binomial 3x3 or 5x5
+//   arg    := value | key "=" value
+// Whitespace around names, keys and values is ignored. Positional values
+// are stored under their option name in FilterSpec::args, so
+// "scale=640:360" and "scale=w=640:h=360" parse identically. Positional
+// values must come before keyed ones. Unknown filters, unknown or repeated
+// options, empty values and missing required options are parse errors.
+// Filters (option names in order of position):
+//   scale=W:H[:flags=bilinear|area]   W or H: a positive size, 0 for the input
+//                                     size, or -N to keep the aspect ratio with
+//                                     the result rounded to a multiple of N (-1
+//                                     exact, -2 even). Both -N: input size.
+//                                     Default flags: bilinear.
+//   format=PIXFMT[:matrix=bt601|bt709][:range=limited|full][:chroma=nearest|bilinear]
+//                                     matrix and range default to the input's
+//   blur=3|5                          binomial 3x3 or 5x5 (option "size")
 //   eq=brightness=B:contrast=C        B int in [-255, 255], C real in [0, 4]
-// Adjacent scale + format stages from yuv to rgb run as one ScaleConvert.
+// Adjacent scale + format stages from yuv to rgb may run as one ScaleConvert.
 struct FilterSpec {
   std::string name;
   std::vector<std::pair<std::string, std::string>> args;
