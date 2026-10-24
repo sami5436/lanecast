@@ -26,6 +26,10 @@ enum class ColorRange : std::uint8_t {
   full,     // all samples in [0, 255] ("pc", "jpeg")
 };
 
+// Horizontal siting of 4:2:0 chroma samples relative to luma (vertical is
+// always centered between rows): left is MPEG-2 / H.264, center is JPEG.
+enum class ChromaLocation : std::uint8_t { left, center };
+
 struct PixelFormatInfo {
   std::string_view name;
   int plane_count;

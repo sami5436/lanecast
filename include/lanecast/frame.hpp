@@ -49,6 +49,7 @@ struct VideoInfo {
   PixelFormat format = PixelFormat::yuv420p;
   ColorRange range = ColorRange::limited;
   ColorMatrix matrix = ColorMatrix::bt601;
+  ChromaLocation chroma_loc = ChromaLocation::left;
   int fps_num = 25;
   int fps_den = 1;
   int sar_num = 1;
