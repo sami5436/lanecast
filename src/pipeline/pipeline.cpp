@@ -30,6 +30,16 @@ class ScaleStage final : public Stage {
         [&](RowRange r) { return scaler->run(in, out, r); }, slice_rows);
   }
   std::unique_ptr<Scaler> scaler;
+  ScaleFilter filter = ScaleFilter::bilinear;
+  VideoInfo input;  // stream shape before this stage, kept for fusion
+};
+
+class ScaleConvertStage final : public Stage {
+ public:
+  Status run(const Frame& in, Frame& out, ThreadPool* pool, int) const override {
+    return fused->run(in, out, pool);
+  }
+  std::unique_ptr<ScaleConvert> fused;
 };
 
 class ConvertStage final : public Stage {
@@ -154,6 +164,8 @@ Status build_scale(const FilterSpec& f, const VideoInfo& cur, std::unique_ptr<St
                            " to " + std::to_string(w) + "x" + std::to_string(h) + ": " +
                            std::string(status_name(s)));
   }
+  st->filter = filter;
+  st->input = cur;
   st->output = cur;
   st->output.width = w;
   st->output.height = h;
@@ -247,6 +259,26 @@ Status build_eq(const FilterSpec& f, const VideoInfo& cur, std::unique_ptr<Stage
   return Status::ok;
 }
 
+// Replaces the last stage (a scale) and `stage` (a yuv to rgb convert) with
+// one ScaleConvert when they are adjacent. On success `stage` is the fused
+// stage and the scale stage is gone from `stages`.
+void fuse_scale_convert(std::vector<std::unique_ptr<Stage>>& stages,
+                        std::unique_ptr<Stage>& stage) {
+  if (stages.empty()) return;
+  const auto* sc = dynamic_cast<const ScaleStage*>(stages.back().get());
+  const auto* cv = dynamic_cast<const ConvertStage*>(stage.get());
+  if (sc == nullptr || cv == nullptr || cv->opts.chroma_loc != sc->input.chroma_loc) return;
+  auto fused = std::make_unique<ScaleConvertStage>();
+  if (ScaleConvert::create(sc->input.format, sc->input.width, sc->input.height,
+                           cv->output.format, sc->output.width, sc->output.height, sc->filter,
+                           cv->opts, fused->fused) != Status::ok) {
+    return;  // not a yuv to rgb pair: keep the two stages
+  }
+  fused->output = cv->output;
+  stage = std::move(fused);
+  stages.pop_back();
+}
+
 }  // namespace
 
 struct Pipeline::Impl {
@@ -283,6 +315,7 @@ Status Pipeline::create(std::string_view chain, const VideoInfo& input,
       s = build_scale(f, cur, stage, error);
     } else if (f.name == "format") {
       s = build_format(f, cur, stage, error);
+      if (s == Status::ok && stage) fuse_scale_convert(impl->stages, stage);
     } else if (f.name == "blur") {
       s = build_blur(f, cur, stage, error);
     } else {
