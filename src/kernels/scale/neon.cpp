@@ -297,6 +297,7 @@ void fill_neon(Table& t) {
   t.hscale[3] = &hscale3;
   t.hscale[4] = &hscale4;
   t.vscale = &vscale;
+  fill_neon_q7(t);
 }
 
 }  // namespace lanecast::kernels::scale
