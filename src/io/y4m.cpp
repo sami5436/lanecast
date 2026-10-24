@@ -4,8 +4,9 @@
 // other tags are skipped. C420, C420jpeg, C420mpeg2, C420paldv and no C tag
 // give yuv420p, Cmono gives gray8; every other chroma layout (C444, C422,
 // high bit depth) is unsupported_format. Interlaced streams (It, Ib, Im) are
-// unsupported_format. C420jpeg implies full range unless XCOLORRANGE says
-// otherwise. FRAME lines may carry parameters, which are ignored.
+// unsupported_format. C420 tags describe chroma siting only: C420jpeg is
+// center, C420, C420mpeg2 and C420paldv are left. Range is limited unless
+// XCOLORRANGE=FULL. FRAME lines may carry parameters, which are ignored.
 #include <charconv>
 #include <string_view>
 #include <vector>
@@ -51,8 +52,6 @@ Status parse_header(const std::string& line, VideoInfo& info) {
   info.range = ColorRange::limited;
   bool have_w = false;
   bool have_h = false;
-  bool range_set = false;
-  bool jpeg = false;
 
   std::size_t pos = kMagic.size();
   while (pos < line.size()) {
@@ -99,9 +98,10 @@ Status parse_header(const std::string& line, VideoInfo& info) {
       case 'C':
         if (val == "420" || val == "420mpeg2" || val == "420paldv") {
           info.format = PixelFormat::yuv420p;
+          info.chroma_loc = ChromaLocation::left;
         } else if (val == "420jpeg") {
           info.format = PixelFormat::yuv420p;
-          jpeg = true;
+          info.chroma_loc = ChromaLocation::center;
         } else if (val == "mono") {
           info.format = PixelFormat::gray8;
         } else {
@@ -111,10 +111,8 @@ Status parse_header(const std::string& line, VideoInfo& info) {
       case 'X':
         if (val == "COLORRANGE=FULL") {
           info.range = ColorRange::full;
-          range_set = true;
         } else if (val == "COLORRANGE=LIMITED") {
           info.range = ColorRange::limited;
-          range_set = true;
         }
         break;
       default: break;
@@ -123,7 +121,6 @@ Status parse_header(const std::string& line, VideoInfo& info) {
   if (!have_w || !have_h) return Status::parse_error;
   if (info.width < 1 || info.height < 1) return Status::parse_error;
   if (info.width > kMaxDimension || info.height > kMaxDimension) return Status::unsupported_format;
-  if (jpeg && !range_set) info.range = ColorRange::full;
   return Status::ok;
 }
 
@@ -168,14 +165,16 @@ class Y4mWriter final : public FrameWriter {
   Status open(const std::string& path) {
     if (Status s = file_.open(path, true); s != Status::ok) return s;
     const bool full = info_.range == ColorRange::full;
+    const bool known_sar = info_.sar_num > 0 && info_.sar_den > 0;
     std::string header = "YUV4MPEG2 W" + std::to_string(info_.width) + " H" +
                          std::to_string(info_.height) + " F" + std::to_string(info_.fps_num) +
                          ":" + std::to_string(info_.fps_den) + " Ip A" +
-                         std::to_string(info_.sar_num) + ":" + std::to_string(info_.sar_den);
+                         (known_sar ? std::to_string(info_.sar_num) + ":" + std::to_string(info_.sar_den)
+                                    : std::string("0:0"));
     if (info_.format == PixelFormat::gray8) {
       header += " Cmono";
     } else {
-      header += full ? " C420jpeg" : " C420mpeg2";
+      header += info_.chroma_loc == ChromaLocation::center ? " C420jpeg" : " C420mpeg2";
     }
     header += full ? " XCOLORRANGE=FULL\n" : " XCOLORRANGE=LIMITED\n";
     return file_.write(header.data(), header.size()) ? Status::ok : Status::io_error;

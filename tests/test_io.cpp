@@ -243,6 +243,24 @@ TEST(y4m_writer_header_text) {
   CHECK_EQ(line, std::string("YUV4MPEG2 W4 H2 F25:1 Ip A1:1 C420mpeg2 XCOLORRANGE=LIMITED"));
 }
 
+TEST(y4m_writer_siting_and_unknown_sar) {
+  TempDir dir;
+  VideoInfo info = make_info(PixelFormat::yuv420p, 4, 2);
+  info.chroma_loc = ChromaLocation::center;
+  info.sar_den = 0;
+  std::unique_ptr<FrameWriter> writer;
+  REQUIRE_OK(open_writer(dir.file("a.y4m"), info, std::nullopt, writer));
+  REQUIRE_OK(writer->finish());
+  std::ifstream in(dir.file("a.y4m"), std::ios::binary);
+  std::string line;
+  std::getline(in, line);
+  CHECK_EQ(line, std::string("YUV4MPEG2 W4 H2 F25:1 Ip A0:0 C420jpeg XCOLORRANGE=LIMITED"));
+  std::unique_ptr<FrameReader> reader;
+  REQUIRE_OK(open_reader(dir.file("a.y4m"), ReaderOptions{}, reader));
+  CHECK(reader->info().chroma_loc == ChromaLocation::center);
+  CHECK(reader->info().range == ColorRange::limited);
+}
+
 namespace {
 
 // A minimal valid y4m with the given header tail, one 2x2 frame of `payload`.
@@ -267,6 +285,9 @@ TEST(y4m_chroma_tags) {
   for (const char* tag : {"", " C420", " C420jpeg", " C420mpeg2", " C420paldv"}) {
     REQUIRE_OK(open_y4m_bytes(dir, y4m_bytes(std::string("W2 H2") + tag, kFrame2x2), reader));
     CHECK(reader->info().format == PixelFormat::yuv420p);
+    CHECK(reader->info().range == ColorRange::limited);
+    const bool jpeg = std::string(tag) == " C420jpeg";
+    CHECK(reader->info().chroma_loc == (jpeg ? ChromaLocation::center : ChromaLocation::left));
   }
   REQUIRE_OK(open_y4m_bytes(dir, y4m_bytes("W2 H2 Cmono", "FRAME\n\x01\x02\x03\x04"), reader));
   CHECK(reader->info().format == PixelFormat::gray8);
@@ -300,7 +321,8 @@ TEST(y4m_header_fields) {
   CHECK_EQ(reader->info().fps_den, 1001);
   CHECK_EQ(reader->info().sar_num, 32);
   CHECK_EQ(reader->info().sar_den, 27);
-  CHECK(reader->info().range == ColorRange::full);  // C420jpeg implies full
+  CHECK(reader->info().range == ColorRange::limited);  // C420jpeg is siting, not range
+  CHECK(reader->info().chroma_loc == ChromaLocation::center);
 
   REQUIRE_OK(open_y4m_bytes(dir, y4m_bytes("W2 H2 C420jpeg XCOLORRANGE=LIMITED", kFrame2x2),
                             reader));
