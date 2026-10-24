@@ -270,6 +270,7 @@ void fill_avx2(Table& t) {
   t.hscale[3] = &hscale3;
   t.hscale[4] = &hscale4;
   t.vscale = &vscale;
+  fill_avx2_q7(t);
 }
 
 }  // namespace lanecast::kernels::scale
