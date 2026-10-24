@@ -43,5 +43,6 @@ void run_comparison(const Comparison& c, Pattern pattern, const Options& opts, i
 
 void add_convert_comparisons(std::vector<Comparison>& out);
 void add_scale_comparisons(std::vector<Comparison>& out);
+void add_fused_comparisons(std::vector<Comparison>& out);
 
 }  // namespace lanecast::bench::ff

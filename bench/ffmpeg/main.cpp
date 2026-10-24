@@ -6,6 +6,7 @@
 //                   [--threads N]
 //
 // Output carries no CPU model, host name or paths.
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -69,6 +70,7 @@ int main(int argc, char** argv) {
   std::vector<Comparison> all;
   add_convert_comparisons(all);
   add_scale_comparisons(all);
+  add_fused_comparisons(all);
 
   ThreadPool pool(threads);
   std::vector<Row> rows;
@@ -86,10 +88,16 @@ int main(int argc, char** argv) {
       run_comparison(c, p, opts, threads, pool, rows, notes);
     }
   }
+  std::vector<std::string> unique_notes;  // skips repeat once per pattern
+  for (const std::string& n : notes) {
+    if (std::find(unique_notes.begin(), unique_notes.end(), n) == unique_notes.end()) {
+      unique_notes.push_back(n);
+    }
+  }
   if (opts.json) {
-    write_json(rows, notes);
+    write_json(rows, unique_notes);
   } else {
-    write_table(rows, notes);
+    write_table(rows, unique_notes);
   }
   return 0;
 }
