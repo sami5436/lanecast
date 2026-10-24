@@ -5,6 +5,8 @@
 // products into each u32 lane in one instruction.
 #include <arm_neon.h>
 
+#include <cstddef>
+
 #include "kernels/metrics/kernels.hpp"
 
 namespace lanecast::kernels::metrics {
@@ -46,8 +48,46 @@ std::uint64_t sse_row(const std::uint8_t* a, const std::uint8_t* b, int count) {
   return total;
 }
 
+// Sums for 4 adjacent 4x4 blocks (16 columns): lane k of val[0..3] holds
+// {sum a, sum b, sum a^2 + b^2, sum a*b} of block k. Each UDOT reduces one
+// row of a block to a lane.
+inline uint32x4x4_t ssim_group(const std::uint8_t* a, std::ptrdiff_t a_stride,
+                               const std::uint8_t* b, std::ptrdiff_t b_stride) {
+  const uint8x16_t ones = vdupq_n_u8(1);
+  uint32x4_t s1 = vdupq_n_u32(0), s2 = s1, ss = s1, ab = s1;
+  for (int y = 0; y < 4; ++y, a += a_stride, b += b_stride) {
+    const uint8x16_t va = vld1q_u8(a);
+    const uint8x16_t vb = vld1q_u8(b);
+    s1 = vdotq_u32(s1, va, ones);
+    s2 = vdotq_u32(s2, vb, ones);
+    ss = vdotq_u32(vdotq_u32(ss, va, va), vb, vb);
+    ab = vdotq_u32(ab, va, vb);
+  }
+  return {{s1, s2, ss, ab}};
+}
+
+void ssim_4x4_row(const std::uint8_t* a, std::ptrdiff_t a_stride, const std::uint8_t* b,
+                  std::ptrdiff_t b_stride, int blocks, std::int32_t (*sums)[4]) {
+  int i = 0;
+  for (; i + 4 <= blocks; i += 4) {
+    vst4q_u32(reinterpret_cast<std::uint32_t*>(sums[i]),
+              ssim_group(a + 4 * i, a_stride, b + 4 * i, b_stride));
+  }
+  if (i < blocks) {
+    // sums holds exactly `blocks` entries: stage the last group.
+    std::uint32_t tmp[16];
+    vst4q_u32(tmp, ssim_group(a + 4 * i, a_stride, b + 4 * i, b_stride));
+    for (int k = 0; i + k < blocks; ++k) {
+      for (int j = 0; j < 4; ++j) sums[i + k][j] = static_cast<std::int32_t>(tmp[4 * k + j]);
+    }
+  }
+}
+
 }  // namespace
 
-void fill_neon_dotprod(Table& t) { t.sse = &sse_row; }
+void fill_neon_dotprod(Table& t) {
+  t.sse = &sse_row;
+  t.ssim_4x4 = &ssim_4x4_row;
+}
 
 }  // namespace lanecast::kernels::metrics
